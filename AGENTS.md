@@ -54,24 +54,36 @@ docs/
 
 ### The four nouns
 
-`Package → Version → File`, plus `Tag → Version`. Plain value structs,
-composition flows upward, fluent builders chain construction:
+`Package → Version → File`, plus `Tag → Version`. The nouns are **chainable
+handles** (interfaces), not value structs. A handle is obtained without I/O;
+existence and contents are observed only when a context-taking method is
+called. Handles compose downward from a `Store`:
 
 ```go
-file := core.Package{Name: "requests"}.
+file := store.Package("requests").
         Version("2.31.0").
         File("requests-2.31.0-py3-none-any.whl")
+rc, err := file.Read(ctx)
 ```
+
+Each noun exposes `Namespace()` and no-I/O parent accessors (`Store()`,
+`Package()`, `Version()`) plus the read/write verbs for its level.
+Creation-time options flow through the variadic `CreateOption`
+(`WithAnnotations`); implementations resolve them with
+`core.NewCreateConfig`.
 
 ### The Store
 
-One interface, **scope-blind at the type level**. Each instance is
-per-scope: the scope (a path prefix like `pypi/global`) is configured at
-construction and never seen by callers. Verbs: list packages/versions/
-files/tags, resolve/set tag, add/read file, blob-redirect URL. Sentinel
-errors (`ErrNotFound`, `ErrAlreadyExists`, `ErrDigestMismatch`,
-`ErrUnsupported`) live in `pkg/core/errors.go` and map to HTTP in a small
-`surface` helper. Deletion/yank verbs are out of v1.
+`Store` is the root handle, **scope-blind at the type level**: the scope (a
+path prefix like `pypi/global`) is configured at construction and never
+appears as a method argument — it is only readable via `Namespace()`. The
+Store hands out `Package` handles (`Package(name)`, `Packages(ctx)`,
+`AddPackage(ctx, name, opts...)`); the remaining verbs (list/add versions,
+files, tags; resolve/set tag; read file; download URL) live on the noun
+handles reachable from it. Sentinel errors (`ErrNotFound`,
+`ErrAlreadyExists`, `ErrDigestMismatch`, `ErrUnsupported`) live in
+`pkg/core/errors.go` and map to HTTP in a small `surface` helper.
+Deletion/yank verbs are out of v1.
 
 ### On-bucket path scheme
 
@@ -90,8 +102,9 @@ children — **one rule, every level**. The format codec in each surface
 **must reject** leading `.` in user-provided package/version/file names.
 
 `.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
-opaque caller-owned `Ext map[string]any` the Store round-trips but never
-interprets. `size` is intentionally absent — derive from bucket attributes.
+opaque caller-owned `Annotations map[string]any` the Store round-trips but
+never interprets. `size` is intentionally absent — derive from bucket
+attributes.
 
 ### gocloud.dev/blob notes
 
@@ -99,10 +112,10 @@ interprets. `size` is intentionally absent — derive from bucket attributes.
   `mem://`, `file:///…`) so the backend is a deployment flag.
 - Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path;
   write the `.meta.<file>` sidecar after the writer closes successfully.
-- `BlobRedirectURL` wraps `bucket.SignedURL` behind a mandatory,
+- `File.DownloadURL` wraps `bucket.SignedURL` behind a mandatory,
   facade-transparent LRU + singleflight cache with per-cloud TTL parsing.
-  memblob/fileblob return no signed URL → cache the miss and let the surface
-  fall back to streaming `ReadFile`.
+  memblob/fileblob return no signed URL → cache the miss and return an empty
+  URL so the surface falls back to streaming `File.Read`.
 - `bucket.List` with a delimiter gives the directory children for the
   listing verbs; sort caller-side if order matters.
 

@@ -25,14 +25,14 @@ func TestMetaJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "arbitrary ext",
+			name: "arbitrary annotations",
 			meta: core.Meta{
 				Digest:    "sha256:def",
 				CreatedAt: time.Date(2026, 5, 20, 1, 2, 3, 0, time.UTC),
 				UpdatedAt: time.Date(2026, 5, 20, 4, 5, 6, 0, time.UTC),
 				// JSON numbers decode to float64; use float64 so the
 				// round-trip is lossless without custom decoding.
-				Ext: map[string]any{
+				Annotations: map[string]any{
 					"requires_python": ">=3.8",
 					"yanked":          false,
 					"downloads":       float64(12345),
@@ -70,7 +70,7 @@ func TestMetaJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMetaOmitsExtWhenEmpty(t *testing.T) {
+func TestMetaOmitsAnnotationsWhenEmpty(t *testing.T) {
 	t.Parallel()
 
 	b, err := json.Marshal(core.Meta{Digest: "sha256:abc"})
@@ -82,7 +82,7 @@ func TestMetaOmitsExtWhenEmpty(t *testing.T) {
 	if err := json.Unmarshal(b, &raw); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	if _, ok := raw["ext"]; ok {
-		t.Errorf("expected ext to be omitted, got: %s", b)
+	if _, ok := raw["annotations"]; ok {
+		t.Errorf("expected annotations to be omitted, got: %s", b)
 	}
 }
