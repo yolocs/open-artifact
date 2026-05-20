@@ -1,0 +1,53 @@
+package core
+
+import "context"
+
+// Package is a handle to a named artifact within a Store's namespace.
+type Package interface {
+	// Name is the package name local to its Store (for example
+	// "requests" or "@databricks/sdk").
+	Name() string
+
+	// Namespace returns the namespace of the owning Store.
+	Namespace() string
+
+	// Store returns the parent Store.
+	Store() Store
+
+	// Meta returns the Package's metadata envelope.
+	Meta(ctx context.Context) (Meta, error)
+
+	// Exists reports whether the Package is present in storage.
+	// Implementations should prefer a cheap probe of the Package's
+	// .meta object and fall back to a descendant check (any Version,
+	// Tag, or File written under the Package) only when the probe
+	// returns ErrNotFound.
+	Exists(ctx context.Context) (bool, error)
+
+	// Annotate updates the Package's annotations map. Other Meta fields
+	// (CreatedAt, UpdatedAt) are managed by the implementation.
+	Annotate(ctx context.Context, annotations map[string]any) error
+
+	// Version returns a handle to the named Version without performing
+	// any I/O.
+	Version(name string) Version
+
+	// Versions lists every Version under this Package.
+	Versions(ctx context.Context) ([]Version, error)
+
+	// AddVersion creates a Version under this Package. Options can carry
+	// creation-time annotations via WithAnnotations.
+	AddVersion(ctx context.Context, name string, opts ...CreateOption) (Version, error)
+
+	// Tag returns a handle to the named Tag without performing any I/O.
+	Tag(name string) Tag
+
+	// Tags lists every Tag under this Package.
+	Tags(ctx context.Context) ([]Tag, error)
+
+	// SetTag creates or updates a Tag, pointing name at the given target
+	// version. Tag mutation is the only writable operation rooted on
+	// Package (rather than Tag) because tags share a single backing
+	// object per Package.
+	SetTag(ctx context.Context, name, target string) error
+}
