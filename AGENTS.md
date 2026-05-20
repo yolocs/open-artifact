@@ -137,5 +137,6 @@ interprets. `size` is intentionally absent — derive from bucket attributes.
 - cobra + viper for the CLI; every flag has a matching env var; no config
   files.
 - Build/test via the `Makefile`; releases via goreleaser.
+- **Always sign off commits** (`git commit -s`) — the repo enforces DCO.
 - Keep `core` free of `surface` and backend imports; keep the dependency
   arrows pointing one way.
