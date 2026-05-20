@@ -7,6 +7,11 @@ type CreateConfig struct {
 	// Annotations are caller-owned key/values stored verbatim in the new
 	// record's Meta.Annotations.
 	Annotations map[string]any
+
+	// AllowOverwrite permits a create operation to clobber an existing
+	// record. When false (the default), writing over an existing record
+	// returns ErrAlreadyExists.
+	AllowOverwrite bool
 }
 
 // CreateOption customizes a create operation (AddPackage, AddVersion,
@@ -26,6 +31,15 @@ func WithAnnotations(annotations map[string]any) CreateOption {
 		for k, v := range annotations {
 			c.Annotations[k] = v
 		}
+	}
+}
+
+// WithAllowOverwrite controls whether a create operation may clobber an
+// existing record. The default (no option, or false) returns ErrAlreadyExists
+// rather than overwriting.
+func WithAllowOverwrite(allow bool) CreateOption {
+	return func(c *CreateConfig) {
+		c.AllowOverwrite = allow
 	}
 }
 
