@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"gocloud.dev/blob"
@@ -23,6 +27,21 @@ type Store struct {
 	bucket *blob.Bucket
 	scope  string
 	now    func() time.Time
+
+	// sign and stat abstract the bucket's SignedURL and Attributes methods so
+	// the facade-transparent caches can be tested in isolation.
+	sign signFunc
+	stat statFunc
+
+	urlTTL  time.Duration
+	statTTL time.Duration
+
+	urlCache  *memoCache[string]
+	statCache *memoCache[*blob.Attributes]
+
+	// tagLocks serializes SetTag read-modify-write per package within this
+	// process. Keyed on the package's .tags path.
+	tagLocks sync.Map
 }
 
 // Option customizes a Store at construction.
@@ -41,13 +60,23 @@ func NewWithBucket(b *blob.Bucket, scope string, opts ...Option) (*Store, error)
 		return nil, errors.New("blobstore: nil bucket")
 	}
 	s := &Store{
-		bucket: b,
-		scope:  scope,
-		now:    time.Now,
+		bucket:  b,
+		scope:   scope,
+		now:     time.Now,
+		urlTTL:  defaultURLCacheTTL,
+		statTTL: defaultStatCacheTTL,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.sign == nil {
+		s.sign = b.SignedURL
+	}
+	if s.stat == nil {
+		s.stat = b.Attributes
+	}
+	s.urlCache = newMemoCache[string](defaultURLCacheCap, s.urlTTL, s.now)
+	s.statCache = newMemoCache[*blob.Attributes](defaultStatCacheCap, s.statTTL, s.now)
 	return s, nil
 }
 
@@ -59,14 +88,110 @@ func (s *Store) Package(name string) core.Package {
 	return &pkg{store: s, name: name}
 }
 
-// Packages is filled in by Milestone 3 (listing).
+// Packages lists every Package present in the Store's namespace. An empty
+// namespace yields an empty slice, not an error.
 func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
-	return nil, core.ErrUnsupported
+	names, err := s.listChildNames(ctx, scopePrefix(s.scope))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Package, 0, len(names))
+	for _, n := range names {
+		out = append(out, &pkg{store: s, name: n})
+	}
+	return out, nil
 }
 
-// AddPackage is filled in by Milestone 3.
+// AddPackage creates a Package's .meta envelope. With AllowOverwrite=false
+// (the default) a pre-existing .meta yields ErrAlreadyExists.
 func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.CreateOption) (core.Package, error) {
-	return nil, core.ErrUnsupported
+	cfg := core.NewCreateConfig(opts...)
+	path := packageMetaPath(s.scope, name)
+	if !cfg.AllowOverwrite {
+		exists, err := s.bucket.Exists(ctx, path)
+		if err != nil {
+			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
+		}
+		if exists {
+			return nil, core.ErrAlreadyExists
+		}
+	}
+	now := s.now().UTC()
+	meta := core.Meta{CreatedAt: now, UpdatedAt: now, Annotations: cfg.Annotations}
+	if err := s.writeMeta(ctx, path, meta); err != nil {
+		return nil, err
+	}
+	return &pkg{store: s, name: name}, nil
+}
+
+// listChildNames lists the immediate, non-dot children under prefix using a
+// "/" delimiter, returning their base names sorted. Dot-entries (the
+// Store-owned .meta/.tags/.cache objects) are dropped at every level — one
+// rule, every level.
+func (s *Store) listChildNames(ctx context.Context, prefix string) ([]string, error) {
+	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
+	var names []string
+	for {
+		obj, err := iter.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("blobstore: list %q: %w", prefix, mapErr(err))
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/")
+		if name == "" || isDotEntry(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// hasDescendant reports whether any object exists under prefix. It backs the
+// descendant fallback in Package/Version Exists: a record with no .meta still
+// exists if anything was written beneath it.
+func (s *Store) hasDescendant(ctx context.Context, prefix string) (bool, error) {
+	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix})
+	_, err := iter.Next(ctx)
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("blobstore: list %q: %w", prefix, mapErr(err))
+	}
+	return true, nil
+}
+
+// readMeta reads and decodes a .meta envelope at path, mapping a missing
+// object to ErrNotFound.
+func (s *Store) readMeta(ctx context.Context, path string) (core.Meta, error) {
+	raw, err := s.bucket.ReadAll(ctx, path)
+	if err != nil {
+		return core.Meta{}, fmt.Errorf("blobstore: read meta %q: %w", path, mapErr(err))
+	}
+	m, err := decodeMeta(raw)
+	if err != nil {
+		return core.Meta{}, fmt.Errorf("blobstore: decode meta %q: %w", path, err)
+	}
+	return m, nil
+}
+
+// upsertAnnotations applies annotations to the .meta at path, preserving
+// CreatedAt when the envelope already exists and bumping UpdatedAt.
+func (s *Store) upsertAnnotations(ctx context.Context, path string, annotations map[string]any) error {
+	m, err := s.readMeta(ctx, path)
+	if err != nil && !errors.Is(err, core.ErrNotFound) {
+		return err
+	}
+	now := s.now().UTC()
+	if m.CreatedAt.IsZero() {
+		m.CreatedAt = now
+	}
+	m.UpdatedAt = now
+	m.Annotations = annotations
+	return s.writeMeta(ctx, path, m)
 }
 
 // pkg is the blobstore implementation of core.Package.
@@ -79,27 +204,94 @@ func (p *pkg) Name() string      { return p.name }
 func (p *pkg) Namespace() string { return p.store.scope }
 func (p *pkg) Store() core.Store { return p.store }
 
-func (p *pkg) Meta(ctx context.Context) (core.Meta, error) { return core.Meta{}, core.ErrUnsupported }
-func (p *pkg) Exists(ctx context.Context) (bool, error)    { return false, core.ErrUnsupported }
+func (p *pkg) Meta(ctx context.Context) (core.Meta, error) {
+	return p.store.readMeta(ctx, packageMetaPath(p.store.scope, p.name))
+}
+
+func (p *pkg) Exists(ctx context.Context) (bool, error) {
+	s := p.store
+	ok, err := s.bucket.Exists(ctx, packageMetaPath(s.scope, p.name))
+	if err != nil {
+		return false, fmt.Errorf("blobstore: probe %q: %w", packageMetaPath(s.scope, p.name), mapErr(err))
+	}
+	if ok {
+		return true, nil
+	}
+	return s.hasDescendant(ctx, packagePrefix(s.scope, p.name))
+}
+
 func (p *pkg) Annotate(ctx context.Context, annotations map[string]any) error {
-	return core.ErrUnsupported
+	return p.store.upsertAnnotations(ctx, packageMetaPath(p.store.scope, p.name), annotations)
 }
 
 func (p *pkg) Version(name string) core.Version { return &version{pkg: p, name: name} }
 
 func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
-	return nil, core.ErrUnsupported
+	s := p.store
+	names, err := s.listChildNames(ctx, packagePrefix(s.scope, p.name))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Version, 0, len(names))
+	for _, n := range names {
+		out = append(out, &version{pkg: p, name: n})
+	}
+	return out, nil
 }
 
 func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOption) (core.Version, error) {
-	return nil, core.ErrUnsupported
+	cfg := core.NewCreateConfig(opts...)
+	s := p.store
+	path := versionMetaPath(s.scope, p.name, name)
+	if !cfg.AllowOverwrite {
+		exists, err := s.bucket.Exists(ctx, path)
+		if err != nil {
+			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
+		}
+		if exists {
+			return nil, core.ErrAlreadyExists
+		}
+	}
+	now := s.now().UTC()
+	meta := core.Meta{CreatedAt: now, UpdatedAt: now, Annotations: cfg.Annotations}
+	if err := s.writeMeta(ctx, path, meta); err != nil {
+		return nil, err
+	}
+	return &version{pkg: p, name: name}, nil
 }
 
 func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
 
-func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) { return nil, core.ErrUnsupported }
+func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
+	m, err := p.store.readTagMap(ctx, p.name)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	out := make([]core.Tag, 0, len(names))
+	for _, n := range names {
+		out = append(out, &tag{pkg: p, name: n})
+	}
+	return out, nil
+}
 
-func (p *pkg) SetTag(ctx context.Context, name, target string) error { return core.ErrUnsupported }
+func (p *pkg) SetTag(ctx context.Context, name, target string) error {
+	s := p.store
+	mu := s.tagMutex(packageTagsPath(s.scope, p.name))
+	mu.Lock()
+	defer mu.Unlock()
+
+	m, err := s.readTagMap(ctx, p.name)
+	if err != nil {
+		return err
+	}
+	m[name] = target
+	return s.writeTagMap(ctx, p.name, m)
+}
 
 // version is the blobstore implementation of core.Version.
 type version struct {
@@ -112,16 +304,42 @@ func (v *version) Namespace() string     { return v.pkg.store.scope }
 func (v *version) Package() core.Package { return v.pkg }
 
 func (v *version) Meta(ctx context.Context) (core.Meta, error) {
-	return core.Meta{}, core.ErrUnsupported
+	s := v.pkg.store
+	return s.readMeta(ctx, versionMetaPath(s.scope, v.pkg.name, v.name))
 }
-func (v *version) Exists(ctx context.Context) (bool, error) { return false, core.ErrUnsupported }
+
+func (v *version) Exists(ctx context.Context) (bool, error) {
+	s := v.pkg.store
+	path := versionMetaPath(s.scope, v.pkg.name, v.name)
+	ok, err := s.bucket.Exists(ctx, path)
+	if err != nil {
+		return false, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
+	}
+	if ok {
+		return true, nil
+	}
+	return s.hasDescendant(ctx, versionPrefix(s.scope, v.pkg.name, v.name))
+}
+
 func (v *version) Annotate(ctx context.Context, annotations map[string]any) error {
-	return core.ErrUnsupported
+	s := v.pkg.store
+	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
 }
 
 func (v *version) File(name string) core.File { return &file{version: v, name: name} }
 
-func (v *version) Files(ctx context.Context) ([]core.File, error) { return nil, core.ErrUnsupported }
+func (v *version) Files(ctx context.Context) ([]core.File, error) {
+	s := v.pkg.store
+	names, err := s.listChildNames(ctx, versionPrefix(s.scope, v.pkg.name, v.name))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.File, 0, len(names))
+	for _, n := range names {
+		out = append(out, &file{version: v, name: n})
+	}
+	return out, nil
+}
 
 // AddFile streams body to the version's blob path while computing a rolling
 // SHA256, then writes the per-file .meta.<file> sidecar carrying the digest
@@ -224,9 +442,9 @@ func (f *file) Meta(ctx context.Context) (core.Meta, error) {
 // is absent.
 func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 	s := f.store()
-	attrs, err := s.bucket.Attributes(ctx, f.blobPath())
+	attrs, err := s.attributes(ctx, f.blobPath())
 	if err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: attributes %q: %w", f.blobPath(), mapErr(err))
+		return core.Meta{}, err
 	}
 
 	r, err := s.bucket.NewReader(ctx, f.blobPath(), nil)
@@ -277,13 +495,31 @@ func (f *file) sidecarDigest(ctx context.Context) string {
 	return m.Digest
 }
 
-// DownloadURL is stubbed for Milestone 2; the SignedURL cache lands in a later
-// milestone.
+// DownloadURL returns a pre-signed download URL through the facade-transparent
+// URL cache (LRU + singleflight). Backends without signing support (memblob,
+// fileblob) report Unimplemented; that miss is cached as an empty string so
+// the surface falls back to streaming Read without re-probing.
 func (f *file) DownloadURL(ctx context.Context) (string, error) {
-	return "", core.ErrUnsupported
+	s := f.store()
+	key := f.blobPath()
+	return s.urlCache.getOrCompute(key, func() (string, error) {
+		// The SignedURL expiry equals the cache TTL, clamped by the backend's
+		// own per-cloud maximum, so a cached URL never outlives its validity.
+		u, err := s.sign(ctx, key, &blob.SignedURLOptions{
+			Expiry: s.urlTTL,
+			Method: http.MethodGet,
+		})
+		if err != nil {
+			if gcerrors.Code(err) == gcerrors.Unimplemented {
+				return "", nil
+			}
+			return "", fmt.Errorf("blobstore: sign %q: %w", key, mapErr(err))
+		}
+		return u, nil
+	})
 }
 
-// tag is the blobstore implementation of core.Tag (stubbed for Milestone 3).
+// tag is the blobstore implementation of core.Tag.
 type tag struct {
 	pkg  *pkg
 	name string
@@ -293,8 +529,26 @@ func (t *tag) Name() string          { return t.name }
 func (t *tag) Namespace() string     { return t.pkg.store.scope }
 func (t *tag) Package() core.Package { return t.pkg }
 
-func (t *tag) Ref(ctx context.Context) (core.Version, error) { return nil, core.ErrUnsupported }
-func (t *tag) Exists(ctx context.Context) (bool, error)      { return false, core.ErrUnsupported }
+func (t *tag) Ref(ctx context.Context) (core.Version, error) {
+	m, err := t.pkg.store.readTagMap(ctx, t.pkg.name)
+	if err != nil {
+		return nil, err
+	}
+	target, ok := m[t.name]
+	if !ok {
+		return nil, core.ErrNotFound
+	}
+	return &version{pkg: t.pkg, name: target}, nil
+}
+
+func (t *tag) Exists(ctx context.Context) (bool, error) {
+	m, err := t.pkg.store.readTagMap(ctx, t.pkg.name)
+	if err != nil {
+		return false, err
+	}
+	_, ok := m[t.name]
+	return ok, nil
+}
 
 // writeMeta encodes and writes a Meta envelope to path.
 func (s *Store) writeMeta(ctx context.Context, path string, m core.Meta) error {
