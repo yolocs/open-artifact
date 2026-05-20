@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"gocloud.dev/blob"
@@ -265,10 +266,16 @@ func TestBlobRedirectMissCachedAndSingleflight(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
 		ctx := t.Context()
 
-		// Count underlying sign calls; memblob/fileblob report Unimplemented.
+		// Gate the signer so the first caller blocks inside the flight until
+		// every racer has joined. Without singleflight each goroutine would
+		// reach the (still-blocked) signer and the count would climb to n;
+		// with it, exactly one underlying sign happens. memblob/fileblob
+		// report Unimplemented, which is recorded as an empty-URL miss.
 		var signCalls atomic.Int64
+		release := make(chan struct{})
 		signer := func(ctx context.Context, key string, opts *blob.SignedURLOptions) (string, error) {
 			signCalls.Add(1)
+			<-release
 			return b.SignedURL(ctx, key, opts)
 		}
 		s, _ := NewWithBucket(b, testScope, withSigner(signer))
@@ -290,6 +297,9 @@ func TestBlobRedirectMissCachedAndSingleflight(t *testing.T) {
 				urls[i], errs[i] = f.DownloadURL(ctx)
 			}()
 		}
+		// Let the racers coalesce onto the in-flight signer, then release it.
+		time.Sleep(20 * time.Millisecond)
+		close(release)
 		wg.Wait()
 
 		for i := 0; i < n; i++ {
@@ -301,9 +311,17 @@ func TestBlobRedirectMissCachedAndSingleflight(t *testing.T) {
 			}
 		}
 		// The miss is cached and singleflight collapses the racers: exactly one
-		// underlying sign attempt.
+		// underlying sign attempt despite n concurrent callers.
 		if got := signCalls.Load(); got != 1 {
 			t.Errorf("underlying sign called %d times, want 1", got)
+		}
+
+		// A later call is served from the cached miss — still no new sign.
+		if u, err := f.DownloadURL(ctx); err != nil || u != "" {
+			t.Fatalf("post-cache DownloadURL: got (%q, %v), want (\"\", nil)", u, err)
+		}
+		if got := signCalls.Load(); got != 1 {
+			t.Errorf("after warm-cache call, sign count = %d, want 1", got)
 		}
 	})
 }
@@ -314,9 +332,14 @@ func TestStatCacheCollapsesLookups(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
 		ctx := t.Context()
 
+		// Gate the statter the same way: a single in-flight lookup held open
+		// until all racers join proves the cache+singleflight collapse them
+		// into one backend call rather than relying on a fast warm-up.
 		var statCalls atomic.Int64
+		release := make(chan struct{})
 		statter := func(ctx context.Context, key string) (*blob.Attributes, error) {
 			statCalls.Add(1)
+			<-release
 			return b.Attributes(ctx, key)
 		}
 		s, _ := NewWithBucket(b, testScope, withStatter(statter))
@@ -330,6 +353,7 @@ func TestStatCacheCollapsesLookups(t *testing.T) {
 		const n = 32
 		var wg sync.WaitGroup
 		sizes := make([]int64, n)
+		errs := make([]error, n)
 		for i := 0; i < n; i++ {
 			i := i
 			wg.Add(1)
@@ -337,17 +361,22 @@ func TestStatCacheCollapsesLookups(t *testing.T) {
 				defer wg.Done()
 				a, err := s.attributes(ctx, key)
 				if err != nil {
-					t.Errorf("attributes: %v", err)
+					errs[i] = err
 					return
 				}
 				sizes[i] = a.Size
 			}()
 		}
+		time.Sleep(20 * time.Millisecond)
+		close(release)
 		wg.Wait()
 
-		for i, sz := range sizes {
-			if sz != int64(len(body)) {
-				t.Errorf("attributes[%d].Size = %d, want %d", i, sz, len(body))
+		for i := 0; i < n; i++ {
+			if errs[i] != nil {
+				t.Fatalf("attributes[%d]: %v", i, errs[i])
+			}
+			if sizes[i] != int64(len(body)) {
+				t.Errorf("attributes[%d].Size = %d, want %d", i, sizes[i], len(body))
 			}
 		}
 		if got := statCalls.Load(); got != 1 {

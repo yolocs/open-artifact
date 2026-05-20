@@ -75,7 +75,10 @@ func NewWithBucket(b *blob.Bucket, scope string, opts ...Option) (*Store, error)
 	if s.stat == nil {
 		s.stat = b.Attributes
 	}
-	s.urlCache = newMemoCache[string](defaultURLCacheCap, s.urlTTL, s.now)
+	// The signed URL is requested for s.urlTTL; cache the entry for slightly
+	// less so it is always evicted before the URL it holds can expire (the
+	// clamp the issue calls for). Signing latency only widens this margin.
+	s.urlCache = newMemoCache[string](defaultURLCacheCap, clampCacheTTL(s.urlTTL), s.now)
 	s.statCache = newMemoCache[*blob.Attributes](defaultStatCacheCap, s.statTTL, s.now)
 	return s, nil
 }

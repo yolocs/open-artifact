@@ -159,6 +159,33 @@ func TestMemoCacheLRUEviction(t *testing.T) {
 	}
 }
 
+func TestClampCacheTTL(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"default 19m capped at 1m margin", 19 * time.Minute, 18 * time.Minute},
+		{"long ttl capped at 1m margin", 24 * time.Hour, 24*time.Hour - time.Minute},
+		{"sub-10m ttl shaves 10%", 5 * time.Minute, 5*time.Minute - 30*time.Second},
+		{"tiny ttl shaves 10%", 10 * time.Second, 9 * time.Second},
+		{"zero passes through", 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := clampCacheTTL(tc.in); got != tc.want {
+				t.Errorf("clampCacheTTL(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			if tc.in > 0 && clampCacheTTL(tc.in) >= tc.in {
+				t.Errorf("clampCacheTTL(%v) must be strictly less than input", tc.in)
+			}
+		})
+	}
+}
+
 func TestFlightGroupCollapsesConcurrentCalls(t *testing.T) {
 	t.Parallel()
 

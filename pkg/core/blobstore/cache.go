@@ -45,6 +45,20 @@ func WithStatCacheTTL(ttl time.Duration) Option {
 	return func(s *Store) { s.statTTL = ttl }
 }
 
+// clampCacheTTL returns the lifetime to cache a signed URL for, given the
+// SignedURL expiry was requested for ttl. It shaves a margin (10%, capped at
+// one minute) so the cached entry never outlives the URL it holds.
+func clampCacheTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return ttl
+	}
+	margin := ttl / 10
+	if margin > time.Minute {
+		margin = time.Minute
+	}
+	return ttl - margin
+}
+
 // withSigner overrides the URL signer (used by tests to count invocations).
 func withSigner(fn signFunc) Option { return func(s *Store) { s.sign = fn } }
 
