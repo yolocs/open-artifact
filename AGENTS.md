@@ -89,7 +89,7 @@ Deletion/yank verbs are out of v1.
 
 ```
 open-artifact/v1/<scope>/<package>/.meta                  ← package API object (optional)
-open-artifact/v1/<scope>/<package>/.tags                  ← dist-tags / aliases (optional)
+open-artifact/v1/<scope>/<package>/.tags/<tag>            ← one object per dist-tag; content = target version
 open-artifact/v1/<scope>/<package>/.cache/                ← package-scoped cache (opaque to Store)
 open-artifact/v1/<scope>/<package>/<version>/.meta        ← version API object (optional)
 open-artifact/v1/<scope>/<package>/<version>/.meta.<file> ← per-file API object (always present; holds digest)
