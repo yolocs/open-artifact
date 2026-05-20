@@ -2,55 +2,31 @@ package blobstore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sync"
-
-	"gocloud.dev/gcerrors"
+	"strings"
 )
 
-// The .tags object is a flat JSON alias map, tag name -> version string, e.g.
-// {"latest":"2.31.0","beta":"3.0.0rc1"}. SetTag is a read-modify-write guarded
-// by an in-process mutex keyed on the package's .tags path. This serializes
-// concurrent writers within a single replica; across replicas the last writer
-// still wins (a lost update is possible). A compare-and-swap on the backing
-// object is the planned follow-up — documented here as a known v1 limitation.
+// Each dist-tag is stored as its own object at .tags/<tag>, whose content is
+// the target version string. SetTag is therefore a single, independent write:
+// there is no shared .tags file to read-modify-write, so concurrent SetTag of
+// distinct tags never contend and no in-process mutex is needed. Concurrent
+// writers of the same tag resolve to last-write-wins, which is the natural and
+// only sensible semantics for a single alias.
 
-// readTagMap reads and parses a package's .tags object. A missing object is
-// not an error: it yields an empty map.
-func (s *Store) readTagMap(ctx context.Context, pkg string) (map[string]string, error) {
-	raw, err := s.bucket.ReadAll(ctx, packageTagsPath(s.scope, pkg))
+// readTagTarget reads the target version recorded for a single dist-tag,
+// mapping a missing object to ErrNotFound via mapErr.
+func (s *Store) readTagTarget(ctx context.Context, pkg, tag string) (string, error) {
+	raw, err := s.bucket.ReadAll(ctx, tagPath(s.scope, pkg, tag))
 	if err != nil {
-		if gcerrors.Code(err) == gcerrors.NotFound {
-			return map[string]string{}, nil
-		}
-		return nil, fmt.Errorf("blobstore: read tags for %q: %w", pkg, mapErr(err))
+		return "", fmt.Errorf("blobstore: read tag %q/%q: %w", pkg, tag, mapErr(err))
 	}
-	var m map[string]string
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("blobstore: decode tags for %q: %w", pkg, err)
-	}
-	if m == nil {
-		m = map[string]string{}
-	}
-	return m, nil
+	return strings.TrimSpace(string(raw)), nil
 }
 
-// writeTagMap serializes and writes a package's .tags object.
-func (s *Store) writeTagMap(ctx context.Context, pkg string, m map[string]string) error {
-	raw, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("blobstore: encode tags for %q: %w", pkg, err)
-	}
-	if err := s.bucket.WriteAll(ctx, packageTagsPath(s.scope, pkg), raw, nil); err != nil {
-		return fmt.Errorf("blobstore: write tags for %q: %w", pkg, mapErr(err))
+// writeTagTarget points a dist-tag at target by writing the single tag object.
+func (s *Store) writeTagTarget(ctx context.Context, pkg, tag, target string) error {
+	if err := s.bucket.WriteAll(ctx, tagPath(s.scope, pkg, tag), []byte(target), nil); err != nil {
+		return fmt.Errorf("blobstore: write tag %q/%q: %w", pkg, tag, mapErr(err))
 	}
 	return nil
-}
-
-// tagMutex returns the process-local mutex guarding a package's .tags object,
-// creating it on first use.
-func (s *Store) tagMutex(key string) *sync.Mutex {
-	v, _ := s.tagLocks.LoadOrStore(key, &sync.Mutex{})
-	return v.(*sync.Mutex)
 }

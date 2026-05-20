@@ -14,7 +14,9 @@ const (
 	metaName = ".meta"
 	// metaFilePrefix prefixes a per-file metadata sidecar: ".meta.<file>".
 	metaFilePrefix = ".meta."
-	// tagsName is the package-level dist-tags / aliases object.
+	// tagsName is the package-level dist-tags directory. Each dist-tag is a
+	// separate object .tags/<tag> whose content is the target version, so a
+	// SetTag is a single independent write — no shared file to read-modify-write.
 	tagsName = ".tags"
 	// cacheDir is the package-scoped cache directory (opaque to the Store).
 	cacheDir = ".cache/"
@@ -41,9 +43,15 @@ func packageMetaPath(scope, pkg string) string {
 	return packagePrefix(scope, pkg) + metaName
 }
 
-// packageTagsPath returns the path of a package's .tags object.
-func packageTagsPath(scope, pkg string) string {
-	return packagePrefix(scope, pkg) + tagsName
+// packageTagsPrefix returns the directory prefix holding a package's dist-tags.
+func packageTagsPrefix(scope, pkg string) string {
+	return packagePrefix(scope, pkg) + tagsName + "/"
+}
+
+// tagPath returns the path of a single dist-tag object, whose content is the
+// target version string.
+func tagPath(scope, pkg, tag string) string {
+	return packageTagsPrefix(scope, pkg) + tag
 }
 
 // versionPrefix returns the directory prefix for a version.

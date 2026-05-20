@@ -226,8 +226,8 @@ func TestSetTagRaceConverges(t *testing.T) {
 		s, _ := NewWithBucket(b, testScope)
 		p := s.Package("requests")
 
-		// N concurrent writers, each setting a distinct tag. With the per-package
-		// mutex serializing read-modify-write, no update is lost.
+		// N concurrent writers, each setting a distinct tag. Because every tag
+		// is its own object, the writes are independent and none can be lost.
 		const n = 24
 		var wg sync.WaitGroup
 		errs := make([]error, n)
@@ -246,16 +246,25 @@ func TestSetTagRaceConverges(t *testing.T) {
 			}
 		}
 
-		got, err := s.readTagMap(ctx, "requests")
+		// Reconstruct the converged tag set by listing and resolving each tag.
+		tags, err := p.Tags(ctx)
 		if err != nil {
-			t.Fatalf("readTagMap: %v", err)
+			t.Fatalf("Tags: %v", err)
+		}
+		got := make(map[string]string, len(tags))
+		for _, tg := range tags {
+			v, err := tg.Ref(ctx)
+			if err != nil {
+				t.Fatalf("Ref %q: %v", tg.Name(), err)
+			}
+			got[tg.Name()] = v.Name()
 		}
 		want := make(map[string]string, n)
 		for i := 0; i < n; i++ {
 			want[fmt.Sprintf("tag-%02d", i)] = fmt.Sprintf("%d.0.0", i)
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
-			t.Errorf("converged tag map (-want +got):\n%s", diff)
+			t.Errorf("converged tags (-want +got):\n%s", diff)
 		}
 	})
 }
@@ -455,7 +464,7 @@ func TestPackageVersionMetaExistsAnnotate(t *testing.T) {
 	})
 }
 
-func TestSetTagCreatesTagsObject(t *testing.T) {
+func TestSetTagCreatesTagObject(t *testing.T) {
 	t.Parallel()
 
 	b := memblob.OpenBucket(nil)
@@ -463,21 +472,29 @@ func TestSetTagCreatesTagsObject(t *testing.T) {
 	ctx := t.Context()
 	s, _ := NewWithBucket(b, testScope)
 
-	// .tags must not exist before the first SetTag.
-	if ok, err := b.Exists(ctx, packageTagsPath(testScope, "fresh")); err != nil || ok {
-		t.Fatalf(".tags pre-existence: got (%v, %v), want (false, nil)", ok, err)
+	// The tag object must not exist before the first SetTag.
+	if ok, err := b.Exists(ctx, tagPath(testScope, "fresh", "latest")); err != nil || ok {
+		t.Fatalf("tag pre-existence: got (%v, %v), want (false, nil)", ok, err)
 	}
 	if err := s.Package("fresh").SetTag(ctx, "latest", "1.0.0"); err != nil {
 		t.Fatalf("SetTag: %v", err)
 	}
-	if ok, err := b.Exists(ctx, packageTagsPath(testScope, "fresh")); err != nil || !ok {
-		t.Fatalf(".tags post-existence: got (%v, %v), want (true, nil)", ok, err)
+	if ok, err := b.Exists(ctx, tagPath(testScope, "fresh", "latest")); err != nil || !ok {
+		t.Fatalf("tag post-existence: got (%v, %v), want (true, nil)", ok, err)
 	}
-	got, err := s.readTagMap(ctx, "fresh")
+	// The object content is the bare target version string.
+	raw, err := b.ReadAll(ctx, tagPath(testScope, "fresh", "latest"))
 	if err != nil {
-		t.Fatalf("readTagMap: %v", err)
+		t.Fatalf("read tag object: %v", err)
 	}
-	if diff := cmp.Diff(map[string]string{"latest": "1.0.0"}, got); diff != "" {
-		t.Errorf("tag map (-want +got):\n%s", diff)
+	if got := string(raw); got != "1.0.0" {
+		t.Errorf("tag object content = %q, want %q", got, "1.0.0")
+	}
+	v, err := s.Package("fresh").Tag("latest").Ref(ctx)
+	if err != nil {
+		t.Fatalf("Ref: %v", err)
+	}
+	if v.Name() != "1.0.0" {
+		t.Errorf("Ref = %q, want %q", v.Name(), "1.0.0")
 	}
 }

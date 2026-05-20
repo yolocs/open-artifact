@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"gocloud.dev/blob"
@@ -38,10 +37,6 @@ type Store struct {
 
 	urlCache  *memoCache[string]
 	statCache *memoCache[*blob.Attributes]
-
-	// tagLocks serializes SetTag read-modify-write per package within this
-	// process. Keyed on the package's .tags path.
-	tagLocks sync.Map
 }
 
 // Option customizes a Store at construction.
@@ -266,15 +261,11 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
 
 func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
-	m, err := p.store.readTagMap(ctx, p.name)
+	s := p.store
+	names, err := s.listChildNames(ctx, packageTagsPrefix(s.scope, p.name))
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(m))
-	for k := range m {
-		names = append(names, k)
-	}
-	sort.Strings(names)
 	out := make([]core.Tag, 0, len(names))
 	for _, n := range names {
 		out = append(out, &tag{pkg: p, name: n})
@@ -283,17 +274,7 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 }
 
 func (p *pkg) SetTag(ctx context.Context, name, target string) error {
-	s := p.store
-	mu := s.tagMutex(packageTagsPath(s.scope, p.name))
-	mu.Lock()
-	defer mu.Unlock()
-
-	m, err := s.readTagMap(ctx, p.name)
-	if err != nil {
-		return err
-	}
-	m[name] = target
-	return s.writeTagMap(ctx, p.name, m)
+	return p.store.writeTagTarget(ctx, p.name, name, target)
 }
 
 // version is the blobstore implementation of core.Version.
@@ -533,23 +514,20 @@ func (t *tag) Namespace() string     { return t.pkg.store.scope }
 func (t *tag) Package() core.Package { return t.pkg }
 
 func (t *tag) Ref(ctx context.Context) (core.Version, error) {
-	m, err := t.pkg.store.readTagMap(ctx, t.pkg.name)
+	target, err := t.pkg.store.readTagTarget(ctx, t.pkg.name, t.name)
 	if err != nil {
 		return nil, err
-	}
-	target, ok := m[t.name]
-	if !ok {
-		return nil, core.ErrNotFound
 	}
 	return &version{pkg: t.pkg, name: target}, nil
 }
 
 func (t *tag) Exists(ctx context.Context) (bool, error) {
-	m, err := t.pkg.store.readTagMap(ctx, t.pkg.name)
+	s := t.pkg.store
+	path := tagPath(s.scope, t.pkg.name, t.name)
+	ok, err := s.bucket.Exists(ctx, path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
 	}
-	_, ok := m[t.name]
 	return ok, nil
 }
 
