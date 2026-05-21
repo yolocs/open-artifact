@@ -107,9 +107,30 @@ Liveness (`/healthz`), readiness (`/readyz`), and the metrics endpoint
 (`--metrics-path`, default `/metrics`) are reserved here via flags; their
 handlers and probe behavior are delivered by the observability work.
 
+## Admin API
+
+`admin serve` exposes the namespace control plane under `/admin/v1/namespaces`.
+It is the only writer of namespace metadata.
+
+| Method   | Path                          | Body   | Success                   |
+| -------- | ----------------------------- | ------ | ------------------------- |
+| `PUT`    | `/admin/v1/namespaces/{name}` | `Spec` | `201` create / `200` update |
+| `GET`    | `/admin/v1/namespaces/{name}` | —      | `200` `Namespace`         |
+| `DELETE` | `/admin/v1/namespaces/{name}` | —      | `204`                     |
+| `GET`    | `/admin/v1/namespaces`        | —      | `200` `{"namespaces":[…]}` |
+
+- The request body for `PUT` is the namespace `Spec` JSON (the name comes from
+  the path). A `Spec` carries `mode` (empty/`hosted` or `proxy`), `policy`,
+  `proxy` (`upstream` + `filters`), and an opaque `format` map. An explicit
+  `mode: "hosted"` is stored as empty; `schema_version` is stamped to `1`.
+- Errors are `{"error":"message"}`: invalid name/spec/schema → `400`, unknown
+  namespace → `404`, deleting a namespace that still holds package data → `409`.
+- `DELETE` only removes an **empty** namespace (no published package data); a
+  namespace holding only regenerable `.cache` data is empty.
+
 ## Deployment notes
 
-- The admin plane has **no built-in authentication**. Deploy `admin serve`
-  behind network/platform access controls. _(behavior planned, #6)_
+- The admin plane has **no built-in authentication**; it logs a warning saying
+  so at startup. Deploy `admin serve` behind network/platform access controls.
 - Run one format per `serve` process; run separate processes for separate
   endpoints.

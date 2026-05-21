@@ -18,7 +18,9 @@ import (
 	"github.com/yolocs/open-artifact/internal/version"
 	"github.com/yolocs/open-artifact/pkg/bucket"
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/serving"
+	"github.com/yolocs/open-artifact/pkg/surface/admin"
 )
 
 // runFunc is the seam between a resolved configuration and the work a command
@@ -90,7 +92,6 @@ func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
 		return err
 	}
 	defer cleanup()
-	_ = bkt // The Store and surfaces consume the bucket in later issues.
 
 	logger.Info("starting server",
 		logging.KeyComponent, component,
@@ -100,6 +101,15 @@ func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
 	)
 
 	mux := http.NewServeMux()
+	if component == "admin" {
+		store, err := namespace.NewStore(bkt, cfg.BucketPrefix)
+		if err != nil {
+			return err
+		}
+		mux.Handle("/admin/v1/", admin.Handler(store, logger))
+	}
+	// Data-plane format routing and surfaces are wired by later issues.
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	return serving.Run(ctx, addr, mux)
 }

@@ -95,7 +95,7 @@ func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
 	}
 	out := make([]core.Package, 0, len(names))
 	for _, n := range names {
-		out = append(out, &pkg{store: s, name: n})
+		out = append(out, &pkg{store: s, name: decodePkgName(n)})
 	}
 	return out, nil
 }
