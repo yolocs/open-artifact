@@ -1,155 +1,103 @@
 # AGENTS.md
 
-Guidance for AI coding assistants (and humans) working on **open-artifact**.
+How we work on **open-artifact** — the principles and conventions for changing
+this codebase. It is deliberately high level. The detailed design lives in
+[`docs/architecture.md`](docs/architecture.md); the roadmap lives in GitHub
+issues.
 
-## What this project is
+open-artifact is a lightweight, stateless, multi-format artifact registry
+(PyPI, npm, Maven) backed by a single `gocloud.dev/blob` bucket — no database,
+no second metadata store. Read `docs/architecture.md` before making
+non-trivial changes.
 
-open-artifact is a lightweight, stateless, multi-format artifact registry.
-It speaks native package-manager protocols (PyPI, npm, …) on the front and
-stores everything — blobs, API objects, dist-tags, caches — as objects in a
-single **`gocloud.dev/blob` bucket** on the back. No external database, no
-bespoke metadata store: the bucket's directory tree *is* the index.
+## Think from first principles
 
-It is the spiritual successor to `yolocs/ocifactory`. ocifactory used an OCI
-registry as its sole backend; we concluded that was the wrong substrate and
-moved to `gocloud.dev/blob`, which gives us S3 / GCS / Azure / filesystem /
-in-memory backends behind one interface. We keep ocifactory's *formats*,
-*CLI philosophy*, and *engineering standards*; we replace the storage layer
-and re-organize the packages into a `core` / `surface` pair.
+Derive decisions from the problem and the architectural invariants, not from
+precedent or from what some document literally says. The invariants in
+`docs/architecture.md` (one blob backend, a pure `core`, the namespace as the
+canonical partition, one product across formats) are the fixed points; reason
+forward from them. When a requirement seems off, surprising, or more complex
+than the problem warrants, question it before building it — the cheapest code
+is the code you talk yourself out of writing. Prefer the simplest design that
+honors the invariants.
 
-## Design pillars (preserve these)
+## Tracking work: issues are the roadmap
 
-1. **`gocloud.dev/blob` is the sole backend.** A `*blob.Bucket` is the
-   storage driver. The `core.Store` wraps it. Do not introduce a second
-   storage system or a metadata database.
-2. **`core` / `surface` separation.** `pkg/core` is what artifact records
-   *are* (data nouns + Store). `pkg/surface` is how clients talk about them
-   (per-format HTTP handler + upstream client). Surfaces import `core` only;
-   `core` knows nothing about HTTP or upstreams; only `cmd/server`
-   constructs a concrete Store and hands it to surfaces.
-3. **Production-ready quality.** Every feature ships with unit *and*
-   integration tests. Tests are not optional or a follow-up.
-4. **Lean operations.** Two binaries (`cmd/server`, later `cmd/client`),
-   container-ready, deployable to Cloud Run / Cloudflare-style runtimes.
-   Every runtime knob is a CLI flag with a matching env var — no config
-   files.
-5. **Strong documentation.** Vision doc, per-surface operator notes, and
-   this file kept current.
+The roadmap lives in **GitHub issues**, not in this repo's docs. Each issue is
+self-contained — it carries its own scope, dependencies, and acceptance
+criteria. Read an issue (and the ones it depends on) before starting, and keep
+status there. Open a tracking issue for non-trivial work.
 
-## Code layout
+**Treat each issue with a grain of salt.** An issue is a snapshot of intent at
+the time it was written; it can be stale, incomplete, or wrong. Reconcile it
+against `docs/architecture.md` and the actual code, and if first-principles
+thinking points to a better path, take it — then update the issue and the
+architecture doc to match. The architecture doc is the source of truth for
+*design*; issues are the source of truth for *what to do next*.
 
-```
-cmd/
-  server/        ← the server binary (cobra + viper)
-  client/        ← the client binary (deferred / later)
-pkg/
-  core/          ← data nouns, Format enum, Store interface, Meta, errors
-    blobstore/   ← core.Store implemented over a gocloud.dev/blob bucket
-  surface/       ← Handler interface + shared HTTP/error helpers
-    pypi/        ← inbound PEP 503/691 + upstream PyPI client
-    npm/         ← inbound npm registry + upstream npm client
-internal/version/
-docs/
-```
+## Keep the architecture doc alive
 
-### The four nouns
+`docs/architecture.md` is a living document. When behavior or structure
+changes, update it in the same change — stale design docs are worse than none.
+If you discover the doc and the code disagree, resolve it (fix one, note why)
+rather than leaving the contradiction. New cross-cutting design decisions
+belong there, not buried in a commit message or an issue comment.
 
-`Package → Version → File`, plus `Tag → Version`. The nouns are **chainable
-handles** (interfaces), not value structs. A handle is obtained without I/O;
-existence and contents are observed only when a context-taking method is
-called. Handles compose downward from a `Store`:
+## Coding principles
 
-```go
-file := store.Package("requests").
-        Version("2.31.0").
-        File("requests-2.31.0-py3-none-any.whl")
-rc, err := file.Read(ctx)
-```
+- **Go only**, unless there's a strong reason. Follow Effective Go.
+- **Explicit, boring code over clever abstractions.** No premature generality;
+  don't build for hypothetical future requirements.
+- **Respect the dependency rule.** `pkg/core` is pure: no HTTP, auth,
+  namespaces, upstreams, or metrics. Surfaces and commands compose those
+  concerns around it; the arrows point one way. (Details in the architecture
+  doc.)
+- **One product, three formats.** PyPI, npm, and Maven must behave
+  identically except where the wire protocol genuinely differs. Shared
+  behavior goes in the shared `surface` framework, not copied per format; if
+  you must diverge, justify it in code and docs.
+- **Security and correctness first.** Validate at system boundaries (untrusted
+  client input, upstream responses); trust internal invariants. Never log
+  credentials.
+- **Comments explain why, not what.** Default to none; add one only when a
+  constraint or hazard isn't obvious from the code.
 
-Each noun exposes `Namespace()` and no-I/O parent accessors (`Store()`,
-`Package()`, `Version()`) plus the read/write verbs for its level.
-Creation-time options flow through the variadic `CreateOption`
-(`WithAnnotations`); implementations resolve them with
-`core.NewCreateConfig`.
+## Harness principles
 
-### The Store
-
-`Store` is the root handle, **scope-blind at the type level**: the scope (a
-path prefix like `pypi/global`) is configured at construction and never
-appears as a method argument — it is only readable via `Namespace()`. The
-Store hands out `Package` handles (`Package(name)`, `Packages(ctx)`,
-`AddPackage(ctx, name, opts...)`); the remaining verbs (list/add versions,
-files, tags; resolve/set tag; read file; download URL) live on the noun
-handles reachable from it. Sentinel errors (`ErrNotFound`,
-`ErrAlreadyExists`, `ErrDigestMismatch`, `ErrUnsupported`) live in
-`pkg/core/errors.go` and map to HTTP in a small `surface` helper.
-Deletion/yank verbs are out of v1.
-
-### On-bucket path scheme
-
-```
-open-artifact/v1/<scope>/<package>/.meta                  ← package API object (optional)
-open-artifact/v1/<scope>/<package>/.tags/<tag>            ← one object per dist-tag; content = target version
-open-artifact/v1/<scope>/<package>/.cache/                ← package-scoped cache (opaque to Store)
-open-artifact/v1/<scope>/<package>/<version>/.meta        ← version API object (optional)
-open-artifact/v1/<scope>/<package>/<version>/.meta.<file> ← per-file API object (always present; holds digest)
-open-artifact/v1/<scope>/<package>/<version>/<file>       ← the file blob
-```
-
-Top-level prefix constant is `open-artifact/v1/`. Leading `.` is reserved
-at every directory level; listings drop dot-entries when enumerating real
-children — **one rule, every level**. The format codec in each surface
-**must reject** leading `.` in user-provided package/version/file names.
-
-`.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
-opaque caller-owned `Annotations map[string]any` the Store round-trips but
-never interprets. `size` is intentionally absent — derive from bucket
-attributes.
-
-### gocloud.dev/blob notes
-
-- Open buckets from a URL (`blob.OpenBucket(ctx, "s3://…")`,
-  `mem://`, `file:///…`) so the backend is a deployment flag.
-- Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path;
-  write the `.meta.<file>` sidecar after the writer closes successfully.
-- `File.DownloadURL` wraps `bucket.SignedURL` behind a mandatory,
-  facade-transparent LRU + singleflight cache with per-cloud TTL parsing.
-  memblob/fileblob return no signed URL → cache the miss and return an empty
-  URL so the surface falls back to streaming `File.Read`.
-- `bucket.List` with a delimiter gives the directory children for the
-  listing verbs; sort caller-side if order matters.
+- **One binary, flags + env, no config files.** `open-artifact` with `serve`
+  and `admin serve`. Every flag has a matching env var (prefix
+  `OPEN_ARTIFACT`); also bind platform `PORT`. Validate config at startup and
+  fail with clear, joined errors.
+- **Build and test via the `Makefile`;** releases via goreleaser.
+- **Always sign off commits** (`git commit -s`) — the repo enforces DCO.
 
 ## Testing standards (non-negotiable)
 
-- **Unit + integration for every feature.** Integration tests live behind a
-  `//go:build integration` tag and run the real `core.Store` against the
-  **memblob** (and where relevant **fileblob** via `t.TempDir()`) backends —
-  no separate fake Store implementation. Cover the hard cases: concurrent
-  `AddFile` to one version, AddFile/ReadFile races, `SetTag` races,
-  empty-scope listings, leading-dot rejection at the codec, digest mismatch.
-- End-to-end surface tests exercise a real client where feasible (`pip
-  install`, `npm install`) against an in-process server.
-- `t.Parallel()` and `t.Context()` in every test.
-- Table-driven tests for multiple inputs.
-- Compare with `cmp.Diff`, not field-by-field assertions.
-- **Fakes, not mocks.** Exercise real layers together.
+- **Unit + integration for every feature, in the same change.** Tests are not
+  a follow-up.
+- Integration tests live behind a `//go:build integration` tag and run the
+  real layers against **`mem://`** (and where relevant **`file://`** via
+  `t.TempDir()`) buckets. **No mock `Store`** for storage or surface behavior —
+  use fakes, exercise real layers together.
+- `t.Parallel()` and `t.Context()` in every test, unless a documented
+  process-global exception applies (e.g. env-var or registry mutation).
+- Table-driven tests for multiple inputs; compare with `cmp.Diff`.
+- Cover the hard cases: concurrent writes to one version, write/read races,
+  tag races, empty-scope listings, leading-dot/`..` rejection at the codec,
+  digest mismatch, cross-namespace isolation, deny-all policy, proxy
+  stale-fallback, filter ordering.
+- End-to-end surface tests drive a real client (`pip`/`twine`, `npm`, `mvn`)
+  against an in-process server. Do **not** require Docker — the backend is
+  memblob/fileblob; only the package-manager client tools need to be
+  installed.
+- Every change: `go test -race ./...`; for storage/surface work also
+  `go test -race -tags=integration ./...`.
 
-## Adding a new surface (checklist)
+## Predecessor code is historical context only
 
-1. New `pkg/surface/<format>` package: inbound handler + upstream client.
-2. Scope-prefixed mount; flags/env for the upstream URL and scope.
-3. Format codec rejects leading-dot names; maps `core` sentinels to the
-   format's HTTP error shape via the shared helper.
-4. Unit tests for the codec + handler; integration tests against memblob;
-   a real-client end-to-end test.
-5. Operator notes in `docs/`.
-
-## Conventions
-
-- Go only; follow Effective Go.
-- cobra + viper for the CLI; every flag has a matching env var; no config
-  files.
-- Build/test via the `Makefile`; releases via goreleaser.
-- **Always sign off commits** (`git commit -s`) — the repo enforces DCO.
-- Keep `core` free of `surface` and backend imports; keep the dependency
-  arrows pointing one way.
+open-artifact is the spiritual successor to `yolocs/ocifactory`. You may study
+ocifactory while *planning* — to understand a format's wire protocol or recall
+a design trade-off — but every detail needed to *implement* open-artifact must
+live in this repo. Do not cite ocifactory as a source of truth, copy its
+storage model, or assume its OCI backend. If something is missing here, add it
+to `docs/architecture.md`.
