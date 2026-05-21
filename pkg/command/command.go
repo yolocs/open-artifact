@@ -1,14 +1,13 @@
-// Package cli is the command layer for the open-artifact binary. It builds the
-// cobra command tree (`serve` and `admin serve`), resolves flags and env vars
-// through viper, and wires the runtime substrate — logger, bucket opener, and
-// HTTP server lifecycle — together. It is the only layer that opens a concrete
-// bucket and registers blob drivers.
-package cli
+// Package command is the command layer for the open-artifact binary. It builds
+// the cobra command tree (`serve` and `admin serve`), resolves flags and env
+// vars through viper, and wires the runtime substrate — logger, bucket opener,
+// and HTTP server lifecycle — together. It is the only layer that opens a
+// concrete bucket and registers blob drivers.
+package command
 
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,16 +15,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yolocs/open-artifact/internal/bucket"
-	"github.com/yolocs/open-artifact/internal/server"
 	"github.com/yolocs/open-artifact/internal/version"
+	"github.com/yolocs/open-artifact/pkg/bucket"
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/serving"
 )
 
 // runFunc is the seam between a resolved configuration and the work a command
-// performs. Tests substitute it to inspect resolution without starting a
-// server.
-type runFunc func(ctx context.Context, cfg *runtimeConfig, logger *slog.Logger) error
+// performs. The logger is carried on ctx (see pkg/logging). Tests substitute it
+// to inspect resolution without starting a server.
+type runFunc func(ctx context.Context, cfg *runtimeConfig) error
 
 // Execute builds the root command and runs it, translating errors into a
 // process exit code. SIGINT/SIGTERM cancel the command context, triggering
@@ -96,8 +95,8 @@ func newAdminServeCommand(run runFunc) *cobra.Command {
 	return cmd
 }
 
-// serveRunE returns a RunE that resolves config, builds the logger, and invokes
-// run.
+// serveRunE returns a RunE that resolves config, builds the logger once, stores
+// it on the context, and invokes run.
 func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		cfg, err := resolveConfig(cmd, dataPlane)
@@ -112,23 +111,26 @@ func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error
 		if err != nil {
 			return err
 		}
-		return run(cmd.Context(), cfg, logger)
+		ctx := logging.ContextWithLogger(cmd.Context(), logger)
+		return run(ctx, cfg)
 	}
 }
 
 // runServe is the real data-plane run function: open the bucket, then serve
 // until the context is cancelled. Format routing, namespaces, and auth are
 // wired by later issues.
-func runServe(ctx context.Context, cfg *runtimeConfig, logger *slog.Logger) error {
-	return serve(ctx, cfg, logger, "serve")
+func runServe(ctx context.Context, cfg *runtimeConfig) error {
+	return serve(ctx, cfg, "serve")
 }
 
 // runAdminServe is the real control-plane run function.
-func runAdminServe(ctx context.Context, cfg *runtimeConfig, logger *slog.Logger) error {
-	return serve(ctx, cfg, logger, "admin")
+func runAdminServe(ctx context.Context, cfg *runtimeConfig) error {
+	return serve(ctx, cfg, "admin")
 }
 
-func serve(ctx context.Context, cfg *runtimeConfig, logger *slog.Logger, component string) error {
+func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
+	logger := logging.FromContext(ctx)
+
 	bkt, cleanup, err := bucket.Open(ctx, cfg.BucketURL)
 	if err != nil {
 		return err
@@ -145,5 +147,5 @@ func serve(ctx context.Context, cfg *runtimeConfig, logger *slog.Logger, compone
 
 	mux := http.NewServeMux()
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	return server.Run(ctx, addr, mux, logger)
+	return serving.Run(ctx, addr, mux)
 }

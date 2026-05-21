@@ -1,14 +1,15 @@
-package cli
+package command
 
 import (
 	"bytes"
 	"context"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+
+	"github.com/yolocs/open-artifact/pkg/logging"
 )
 
 // runServeCapture executes a `serve` command with args, capturing the resolved
@@ -17,8 +18,12 @@ import (
 func runServeCapture(t *testing.T, args ...string) (*runtimeConfig, error) {
 	t.Helper()
 	var captured *runtimeConfig
-	cmd := newServeCommand(func(_ context.Context, cfg *runtimeConfig, _ *slog.Logger) error {
+	cmd := newServeCommand(func(ctx context.Context, cfg *runtimeConfig) error {
 		captured = cfg
+		// The logger must be on the context by the time run is invoked.
+		if logging.FromContext(ctx) == nil {
+			t.Error("run invoked without a logger on the context")
+		}
 		return nil
 	})
 	cmd.SetArgs(args)
@@ -163,7 +168,7 @@ func TestAdminServeDefaultPort(t *testing.T) {
 	t.Parallel()
 
 	var captured *runtimeConfig
-	cmd := newAdminServeCommand(func(_ context.Context, cfg *runtimeConfig, _ *slog.Logger) error {
+	cmd := newAdminServeCommand(func(_ context.Context, cfg *runtimeConfig) error {
 		captured = cfg
 		return nil
 	})

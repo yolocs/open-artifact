@@ -6,9 +6,9 @@ package main
 import (
 	"os"
 
-	"github.com/yolocs/open-artifact/internal/cli"
+	"github.com/yolocs/open-artifact/pkg/command"
 )
 
 func main() {
-	os.Exit(cli.Execute())
+	os.Exit(command.Execute())
 }

@@ -103,11 +103,11 @@ cmd/
   open-artifact/     ← single binary: `serve` + `admin serve`
   artctl/            ← admin/inspection CLI (deferred to post-parity)
 internal/
-  cli/               ← cobra/viper command tree, config resolution + validation
-  bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
-  server/            ← shared HTTP server lifecycle (graceful shutdown)
   version/           ← single source of build identity
 pkg/
+  command/           ← cobra/viper command tree, config resolution + validation
+  bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
+  serving/           ← shared HTTP server lifecycle (graceful shutdown) + logger middleware
   core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
     blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
   logging/           ← slog setup, context helpers, stable fields
@@ -305,9 +305,11 @@ commit, and `GOOS/GOARCH`. Every flag has a matching env var (prefix
 `SilenceUsage`/`SilenceErrors` so errors are testable; each command validates
 config at startup and fails with clear, joined errors. Data-plane-only flags
 (`--repo-type`, `--disable-authn`, `--authn-*`) live on `serve` and are stubbed
-here for later issues. The command layer is the only place that opens a bucket
-and registers blob drivers (`internal/bucket`); the logger (`pkg/logging`) and
-HTTP server lifecycle (`internal/server`) are shared by both planes. The
+here for later issues. The command layer (`pkg/command`) is the only place that
+opens a bucket and registers blob drivers (`pkg/bucket`). The logger
+(`pkg/logging`) is built once at command start, placed on the context, and
+flows down from there; the shared HTTP server lifecycle (`pkg/serving`) reads it
+from the context and a middleware injects it onto every request's context. The
 `artctl` client (deferred to post-parity) talks HTTP only and never opens a
 bucket.
 

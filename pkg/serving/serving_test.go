@@ -1,13 +1,18 @@
-package server
+package serving
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/yolocs/open-artifact/pkg/logging"
 )
 
 func TestServeGracefulShutdown(t *testing.T) {
@@ -26,7 +31,7 @@ func TestServeGracefulShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, ln, mux, nil) }()
+	go func() { done <- Serve(ctx, ln, mux) }()
 
 	resp, err := http.Get("http://" + addr + "/ping")
 	if err != nil {
@@ -58,7 +63,7 @@ func TestRunDynamicPort(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, "127.0.0.1:0", http.NewServeMux(), nil) }()
+	go func() { done <- Run(ctx, "127.0.0.1:0", http.NewServeMux()) }()
 
 	// Give Run a moment to bind, then cancel; it should shut down cleanly.
 	time.Sleep(50 * time.Millisecond)
@@ -77,7 +82,26 @@ func TestRunDynamicPort(t *testing.T) {
 func TestRunListenError(t *testing.T) {
 	t.Parallel()
 
-	if err := Run(t.Context(), "127.0.0.1:-1", http.NewServeMux(), nil); err == nil {
+	if err := Run(t.Context(), "127.0.0.1:-1", http.NewServeMux()); err == nil {
 		t.Fatal("Run with invalid addr = nil error, want error")
+	}
+}
+
+func TestWithLoggerInjectsRequestLogger(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	var got *slog.Logger
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got = logging.FromContext(r.Context())
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+	WithLogger(logger, next).ServeHTTP(httptest.NewRecorder(), req)
+
+	if got != logger {
+		t.Error("WithLogger did not place the logger on the request context")
 	}
 }
