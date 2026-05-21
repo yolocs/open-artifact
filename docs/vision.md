@@ -85,7 +85,7 @@ package manager ──HTTP──▶ surface (pypi|npm|maven) ──▶ namespace
   metrics, and surfaces are wired. `serve` runs one format; `admin serve` runs
   the control plane. cobra + viper; every knob is a flag with a matching env
   var; no config files.
-- **`cmd/client`** — an admin/inspection CLI. Deferred to post-parity.
+- **`cmd/artctl`** — the `artctl` admin/inspection CLI. Deferred to post-parity.
 
 See `AGENTS.md` for the full path scheme, dot-file rules, the Store verb set,
 namespace/auth/proxy detail, and the gocloud usage notes.
@@ -128,7 +128,7 @@ no shared JSON tags map).
   per `serve` process; run separate processes for separate endpoints.
 - **SSE-C / per-blob-key encrypted buckets**, cross-region failover, external
   blob paths — revisit when a concrete requirement lands.
-- **The client binary** — server first; deferred to post-parity (#29).
+- **The `artctl` client binary** — server first; deferred to post-parity (#29).
 
 ## Roadmap
 
@@ -150,7 +150,7 @@ In brief:
 12. **#26** Parity 14 — CI matrix: real-client, live-upstream, OIDC e2e.
 13. **#27** Parity 15 — goreleaser, distroless image, SBOMs, signatures.
 14. **#28** Parity 16 — operator docs, deployment guides, runbooks.
-15. **#29** Post-parity — the client binary.
+15. **#29** Post-parity — the `artctl` client binary.
 
 **Already implemented (#1–#3):** the `core` substrate (nouns, Store, Meta,
 errors) and the full `blobstore` Store — streaming writes/reads with digest

@@ -103,7 +103,7 @@ parity issues are marked *(planned, #N)*.
 ```
 cmd/
   open-artifact/     ← single binary: `serve` + `admin serve` (planned, #5; today scaffolded under cmd/server)
-  client/            ← admin/inspection CLI (deferred, post-parity #29)
+  artctl/            ← admin/inspection CLI (deferred, post-parity #29)
 pkg/
   core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
     blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
@@ -388,4 +388,4 @@ self-contained — read it before starting.
 | **#26** | Parity 14: CI matrix, real-client + live-upstream + OIDC e2e | #25 |
 | **#27** | Parity 15: goreleaser, distroless image, SBOMs, signatures | #25 |
 | **#28** | Parity 16: operator docs, deployment guides, runbooks | #25, #26, #27 |
-| **#29** | Post-parity: client binary for admin/inspection | #25 |
+| **#29** | Post-parity: `artctl` client binary for admin/inspection | #25 |
