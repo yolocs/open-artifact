@@ -329,6 +329,17 @@ operator-controlled bucket. Reader policy is sufficient to populate cache.
 
 ## Adding a new surface (checklist)
 
+**Consistency across surfaces is a first-class requirement.** PyPI, npm, and
+Maven must feel like one product, not three. A surface only owns the part that
+is genuinely format-specific — its wire protocol and codec. Everything else
+(namespace lookup and authz, hosted/proxy dispatch, error→HTTP mapping,
+redirect-or-stream downloads, metrics/op labeling, upload caps, cache TTL
+handling) goes through the **shared `surface` framework** (#18) so all formats
+behave identically. If two surfaces need the same behavior, factor it into the
+shared layer rather than copying it; if you must diverge, say why in the code
+and the docs. Match the existing surfaces' naming, flag/env conventions, error
+shapes, and test layout.
+
 1. New `pkg/surface/<format>` package: inbound protocol handler + outbound
    upstream client. Construct it from the **namespace registry** (#6/#7),
    never a raw `*blobstore.Store`.
@@ -355,37 +366,10 @@ operator-controlled bucket. Reader policy is sufficient to populate cache.
   as the behavior they describe.
 - **Always sign off commits** (`git commit -s`) — the repo enforces DCO.
 
-## Roadmap (parity issues, in dependency order)
+## Tracking work
 
-Done is what shipped before this guide; everything else is open. Each issue is
-self-contained — read it before starting.
-
-**Shipped (core substrate):**
-
-- **#1** core: nouns, Format enum, Store interface, Meta, sentinel errors.
-- **#2** blobstore: streaming `AddFile`/`ReadFile` over a `blob.Bucket`.
-- **#3** blobstore: listings, tags, cached blob-redirect — `core.Store`
-  complete.
-
-**Open (parity), with dependencies:**
-
-| Issue | Title | Depends on |
-|------|-------|------------|
-| **#4** (this) | Parity 0: refresh agent rules, docs, roadmap | #1, #2, #3 |
-| **#5** | Parity 1: runtime foundation, CLI, bucket opener, logging | #4 |
-| **#6** | Parity 2: namespace catalog + admin service | #5 |
-| **#7** | Parity 3: OIDC authn, middleware, per-namespace authz | #6 |
-| **#16** | Parity 4: observability endpoints, Prometheus metrics, request logs | #5, #6 |
-| **#17** | Parity 5: proxy cache primitives + filter policy | #6, #16 |
-| **#18** | Parity 6: shared surface framework + real-client test harness | #7, #16 |
-| **#19** | Parity 7: PyPI hosted surface (PEP 503/691, twine, pip) | #18 |
-| **#20** | Parity 8: PyPI proxy mode (pull-through + stale fallback) | #19, #17 |
-| **#21** | Parity 9: npm hosted surface (publish, install, dist-tags) | #18 |
-| **#22** | Parity 10: npm proxy mode | #21, #17 |
-| **#23** | Parity 11: Maven hosted surface (Maven 2 layout, snapshots) | #18 |
-| **#24** | Parity 12: Maven proxy mode | #23, #17 |
-| **#25** | Parity 13: `serve` command wiring for PyPI/npm/Maven | #7, #16, #19–#24 |
-| **#26** | Parity 14: CI matrix, real-client + live-upstream + OIDC e2e | #25 |
-| **#27** | Parity 15: goreleaser, distroless image, SBOMs, signatures | #25 |
-| **#28** | Parity 16: operator docs, deployment guides, runbooks | #25, #26, #27 |
-| **#29** | Post-parity: `artctl` client binary for admin/inspection | #25 |
+The roadmap lives in **GitHub issues**, not in this file. Each issue is
+self-contained and carries its own dependencies, scope, and acceptance
+criteria — read the issue (and the ones it depends on) before starting, and
+keep status there. Don't duplicate a task list here; this guide describes how
+to build, the issues describe what to build next.
