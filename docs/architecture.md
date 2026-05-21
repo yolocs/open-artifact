@@ -4,7 +4,8 @@ The design reference for open-artifact: what the pieces are, how they fit, and
 the invariants that hold them together. This is a **living document** — keep it
 current as the design evolves, and update it in the same change as the behavior
 it describes. For how we work on the project see [`../AGENTS.md`](../AGENTS.md);
-the roadmap lives in GitHub issues.
+for how to run and configure the binary see
+[`operations.md`](operations.md); the roadmap lives in GitHub issues.
 
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation and the runtime foundation (CLI, bucket opener,

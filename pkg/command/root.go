@@ -53,50 +53,13 @@ func NewRootCommand() *cobra.Command {
 	}
 	root.SetVersionTemplate("{{.Version}}\n")
 
-	admin := &cobra.Command{
-		Use:           "admin",
-		Short:         "Control-plane commands",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-	}
-	admin.AddCommand(newAdminServeCommand(runAdminServe))
-
 	root.AddCommand(newServeCommand(runServe))
-	root.AddCommand(admin)
+	root.AddCommand(newAdminCommand())
 	return root
 }
 
-// newServeCommand builds the data-plane `serve` command.
-func newServeCommand(run runFunc) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:           "serve",
-		Short:         "Run the data-plane server",
-		Args:          cobra.NoArgs,
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          serveRunE(run, true),
-	}
-	addSharedFlags(cmd.Flags(), defaultDataPort)
-	addDataPlaneFlags(cmd.Flags())
-	return cmd
-}
-
-// newAdminServeCommand builds the `admin serve` control-plane command.
-func newAdminServeCommand(run runFunc) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:           "serve",
-		Short:         "Run the admin (control-plane) server",
-		Args:          cobra.NoArgs,
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          serveRunE(run, false),
-	}
-	addSharedFlags(cmd.Flags(), defaultAdminPort)
-	return cmd
-}
-
 // serveRunE returns a RunE that resolves config, builds the logger once, stores
-// it on the context, and invokes run.
+// it on the context, and invokes run. It is shared by every serving command.
 func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		cfg, err := resolveConfig(cmd, dataPlane)
@@ -116,18 +79,9 @@ func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error
 	}
 }
 
-// runServe is the real data-plane run function: open the bucket, then serve
-// until the context is cancelled. Format routing, namespaces, and auth are
-// wired by later issues.
-func runServe(ctx context.Context, cfg *runtimeConfig) error {
-	return serve(ctx, cfg, "serve")
-}
-
-// runAdminServe is the real control-plane run function.
-func runAdminServe(ctx context.Context, cfg *runtimeConfig) error {
-	return serve(ctx, cfg, "admin")
-}
-
+// serve is the shared server lifecycle: open the bucket, then serve until the
+// context is cancelled. Format routing, namespaces, and auth are wired by later
+// issues. The logger is taken from ctx.
 func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
 	logger := logging.FromContext(ctx)
 
