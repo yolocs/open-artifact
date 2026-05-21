@@ -112,14 +112,14 @@ pkg/
   core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
     blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
   logging/           ← slog setup, context helpers, stable fields
-  namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory (planned)
+  namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory
   auth/              ← Authenticator/Authorizer, middleware, sentinels (planned)
     oidc/            ← OIDC discovery + token verification (planned)
     chain/           ← multi-issuer authenticator chain (planned)
   metrics/           ← Recorder interface, NoOp + Prometheus impls (planned)
   proxy/             ← upstream HTTP client, blob-backed cache, negative cache, filters (planned)
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
-    admin/           ← namespace CRUD HTTP API (planned)
+    admin/           ← namespace CRUD HTTP API
     pypi/            ← PEP 503/691 hosted + proxy (planned)
     npm/             ← npm registry hosted + proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
@@ -194,7 +194,13 @@ open-artifact/v1/<ns>/<fmt>/<package>/<version>/<file>       ← the file blob
 
 The data-plane factory binds a `blobstore.Store` to scope `<ns>/<fmt>`; the
 blobstore path helpers lay out everything from `<package>` down. The namespace
-catalog (admin plane) owns the `<ns>/.meta` object.
+catalog (admin plane) owns the `<ns>/.meta` object and is its only writer.
+
+A package name that contains `/` — npm scoped names like `@scope/name` — is
+percent-encoded into a single path segment by the blobstore path helpers
+(`@scope%2Fname`) so it stays one bucket child and round-trips losslessly
+through listing. The encoding is internal to `blobstore`; callers use the
+logical name.
 
 **No side indexes — listing is the index.** The namespace catalog is the
 top-level child listing under the root (drop dot-entries); a namespace
@@ -224,7 +230,7 @@ opaque caller-owned `Annotations map[string]any` the Store round-trips but
 never interprets. `size` is intentionally absent — derive it from bucket
 attributes.
 
-## Namespaces and modes (planned)
+## Namespaces and modes
 
 - **Name validation:** 1–64 chars, lowercase ASCII letters/digits/`-`, no
   leading/trailing `-`, no leading `_`/`.`; reject reserved names (`admin`,
@@ -234,10 +240,29 @@ attributes.
   `proxy`), `policy` (readers/writers subject matchers), `proxy`
   (upstream + filters), and an opaque `format` map that must round-trip
   unknown JSON. Hosted is the default; `proxy` requires an absolute http(s)
-  `upstream`; hosted must reject a non-empty proxy block.
-- **Admin API** (`/admin/v1/namespaces/...`) is the only writer of namespace
-  metadata. It has **no built-in auth** — it must log a startup warning and
-  operators must deploy it behind network/platform controls.
+  `upstream`; hosted must reject a non-empty proxy block. On write the spec is
+  normalized — `schema_version` is stamped to the current version and an
+  explicit `mode: "hosted"` is collapsed to empty so hosted JSON stays compact;
+  a stored spec newer than this binary understands is rejected on read.
+- **Store** (`pkg/namespace`) is the blob-backed catalog: `Put`/`Get`/`List`/
+  `Delete` over `<ns>/.meta`, with an `OnChange` mutation hook for cache/authz
+  invalidation. Listing is the index — `List` enumerates top-level child
+  directories (dropping dot-entries) and loads each `.meta`, skipping a
+  directory that has none. `Delete` refuses a namespace that still holds
+  package data (a non-dot child under any non-dot format directory); a
+  `.meta`/`.cache`-only namespace is empty.
+- **Registry** (`pkg/namespace`) is the data-plane factory: `For(ns, fmt)`
+  validates the namespace name and format (`pypi`, `npm`, `maven`) and yields a
+  `Scoped` handle whose `Store()` is a `blobstore.Store` bound to scope
+  `<ns>/<fmt>` and whose `Spec(ctx)` resolves the namespace spec live — admin
+  changes are visible without restart, and an unknown namespace maps to
+  `ErrNotFound`.
+- **Admin API** (`/admin/v1/namespaces/...`, `pkg/surface/admin`) is the only
+  writer of namespace metadata: `PUT` (201 create / 200 update), `GET`,
+  `DELETE` (204; 409 when non-empty), and `GET` list. Errors use
+  `{"error":"…"}` and map invalid name/spec/schema → 400, missing → 404,
+  non-empty delete → 409. It has **no built-in auth** — it logs a startup
+  warning and operators must deploy it behind network/platform controls.
 - **Authz** is enforced *below* surface protocol code, in the
   namespace-scoped Store wrapper: every read/write op is authorized against
   the namespace policy before it reaches `core.Store`. Empty policy is

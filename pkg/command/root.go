@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	"gocloud.dev/blob"
 
 	"github.com/yolocs/open-artifact/internal/version"
 	"github.com/yolocs/open-artifact/pkg/bucket"
@@ -79,10 +80,10 @@ func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error
 	}
 }
 
-// serve is the shared server lifecycle: open the bucket, then serve until the
-// context is cancelled. Format routing, namespaces, and auth are wired by later
-// issues. The logger is taken from ctx.
-func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
+// serve is the shared server lifecycle: open the bucket, build the plane's
+// handler, then serve until the context is cancelled. build receives the open
+// bucket and returns the plane-specific handler; the logger is taken from ctx.
+func serve(ctx context.Context, cfg *runtimeConfig, component string, build func(*blob.Bucket) (http.Handler, error)) error {
 	logger := logging.FromContext(ctx)
 
 	bkt, cleanup, err := bucket.Open(ctx, cfg.BucketURL)
@@ -90,7 +91,6 @@ func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
 		return err
 	}
 	defer cleanup()
-	_ = bkt // The Store and surfaces consume the bucket in later issues.
 
 	logger.Info("starting server",
 		logging.KeyComponent, component,
@@ -99,7 +99,11 @@ func serve(ctx context.Context, cfg *runtimeConfig, component string) error {
 		"metrics_enabled", cfg.EnableMetrics,
 	)
 
-	mux := http.NewServeMux()
+	handler, err := build(bkt)
+	if err != nil {
+		return err
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	return serving.Run(ctx, addr, mux)
+	return serving.Run(ctx, addr, handler)
 }

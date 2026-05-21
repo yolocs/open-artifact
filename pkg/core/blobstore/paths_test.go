@@ -1,6 +1,9 @@
 package blobstore
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPathHelpers(t *testing.T) {
 	t.Parallel()
@@ -51,6 +54,47 @@ func TestScopePrefixNormalization(t *testing.T) {
 		if got := scopePrefix(tc.scope); got != tc.want {
 			t.Errorf("scopePrefix(%q) = %q, want %q", tc.scope, got, tc.want)
 		}
+	}
+}
+
+func TestPackageNameEncoding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		enc  string
+	}{
+		{"requests", "requests"},
+		{"@scope/name", "@scope%2Fname"},
+		{"a/b/c", "a%2Fb%2Fc"},
+		{"with space", "with%20space"},
+		{"100%", "100%25"},
+		{"%2F", "%252F"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := encodePkgName(tc.name)
+			if got != tc.enc {
+				t.Errorf("encodePkgName(%q) = %q, want %q", tc.name, got, tc.enc)
+			}
+			if strings.Contains(got, "/") {
+				t.Errorf("encodePkgName(%q) = %q contains a path separator", tc.name, got)
+			}
+			if rt := decodePkgName(got); rt != tc.name {
+				t.Errorf("decodePkgName(%q) = %q, want %q", got, rt, tc.name)
+			}
+		})
+	}
+}
+
+func TestPackagePrefixEncodesScopedName(t *testing.T) {
+	t.Parallel()
+
+	got := packageMetaPath("team-a/npm", "@scope/name")
+	want := "open-artifact/v1/team-a/npm/@scope%2Fname/.meta"
+	if got != want {
+		t.Errorf("packageMetaPath = %q, want %q", got, want)
 	}
 }
 

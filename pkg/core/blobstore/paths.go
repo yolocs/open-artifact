@@ -1,6 +1,9 @@
 package blobstore
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // Root is the constant top-level prefix under which every open-artifact
 // object lives. It is fixed across all scopes and backends.
@@ -33,9 +36,27 @@ func scopePrefix(scope string) string {
 	return Root + scope + "/"
 }
 
+// encodePkgName renders a logical package name as a single path-safe segment.
+// npm scoped names like "@scope/name" carry a "/" that would otherwise nest
+// into directories and break listing; percent-encoding it (via url.PathEscape)
+// keeps the package one bucket child while staying lossless.
+func encodePkgName(name string) string {
+	return url.PathEscape(name)
+}
+
+// decodePkgName reverses encodePkgName for a listed child segment. A segment
+// that fails to decode is returned unchanged so listings never silently drop
+// objects.
+func decodePkgName(seg string) string {
+	if dec, err := url.PathUnescape(seg); err == nil {
+		return dec
+	}
+	return seg
+}
+
 // packagePrefix returns the directory prefix for a package.
 func packagePrefix(scope, pkg string) string {
-	return scopePrefix(scope) + pkg + "/"
+	return scopePrefix(scope) + encodePkgName(pkg) + "/"
 }
 
 // packageMetaPath returns the path of a package's .meta object.
