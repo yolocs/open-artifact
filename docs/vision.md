@@ -87,8 +87,9 @@ package manager ──HTTP──▶ surface (pypi|npm|maven) ──▶ namespace
   var; no config files.
 - **`cmd/artctl`** — the `artctl` admin/inspection CLI. Deferred to post-parity.
 
-See `AGENTS.md` for the full path scheme, dot-file rules, the Store verb set,
-namespace/auth/proxy detail, and the gocloud usage notes.
+See [`architecture.md`](architecture.md) for the full path scheme, dot-file
+rules, the Store verb set, namespace/auth/proxy detail, and the gocloud usage
+notes.
 
 ## Storage model (summary)
 
@@ -117,9 +118,9 @@ no shared JSON tags map).
 
 ## Non-goals / deferred (v1)
 
-- **Deletion / yank / unpublish** — semantics differ across formats; a
-  separate design pass. (Soft-delete *bookkeeping* exists via the package
-  index so an empty namespace can be deleted.)
+- **Deletion / yank / unpublish of packages** — semantics differ across
+  formats; a separate design pass. (Deleting an *empty* namespace is supported;
+  emptiness is derived from listing, not a side index.)
 - **Multi-replica `SetTag`** — v1 guards the per-tag read-modify-write with an
   in-process mutex; multi-replica needs CAS / conditional writes at the bucket
   layer.
@@ -128,34 +129,31 @@ no shared JSON tags map).
   per `serve` process; run separate processes for separate endpoints.
 - **SSE-C / per-blob-key encrypted buckets**, cross-region failover, external
   blob paths — revisit when a concrete requirement lands.
-- **The `artctl` client binary** — server first; deferred to post-parity (#29).
+- **The `artctl` client binary** — server first; deferred to post-parity.
 
 ## Roadmap
 
-The parity work is tracked as GitHub issues in dependency order. The full
-table — including which dependencies block which issue — lives in `AGENTS.md`.
-In brief:
+The parity work is tracked as **GitHub issues**, in dependency order — that is
+the single source of truth for what comes next, so this doc won't duplicate the
+list. Broadly, the build order is:
 
-1. **#4** Parity 0 — docs, agent rules, roadmap (this work). *Depends #1–#3.*
-2. **#5** Parity 1 — runtime foundation: CLI, bucket opener, logging.
-3. **#6** Parity 2 — namespace catalog + admin service.
-4. **#7** Parity 3 — OIDC authn + per-namespace authz.
-5. **#16** Parity 4 — observability: health/ready, metrics, request logs.
-6. **#17** Parity 5 — proxy cache primitives + filter policy.
-7. **#18** Parity 6 — shared surface framework + real-client harness.
-8. **#19 / #20** Parity 7–8 — PyPI hosted, then PyPI proxy.
-9. **#21 / #22** Parity 9–10 — npm hosted, then npm proxy.
-10. **#23 / #24** Parity 11–12 — Maven hosted, then Maven proxy.
-11. **#25** Parity 13 — `serve` command wiring for all three formats.
-12. **#26** Parity 14 — CI matrix: real-client, live-upstream, OIDC e2e.
-13. **#27** Parity 15 — goreleaser, distroless image, SBOMs, signatures.
-14. **#28** Parity 16 — operator docs, deployment guides, runbooks.
-15. **#29** Post-parity — the `artctl` client binary.
+1. Runtime foundation: CLI, bucket opener, logging.
+2. Namespace catalog + admin service.
+3. OIDC authn + per-namespace authz.
+4. Observability: health/ready, metrics, structured request logs.
+5. Proxy cache primitives + filter policy.
+6. Shared surface framework + real-client test harness.
+7. The PyPI, npm, and Maven surfaces (hosted, then proxy, for each).
+8. `serve` command wiring for all three formats.
+9. CI matrix and the release pipeline (goreleaser, distroless image, SBOMs,
+   signatures), plus operator docs and runbooks.
+10. Post-parity: the `artctl` client binary.
 
-**Already implemented (#1–#3):** the `core` substrate (nouns, Store, Meta,
-errors) and the full `blobstore` Store — streaming writes/reads with digest
-sidecars, listing verbs with dot-filtering, per-tag RMW with mutex, and the
-SignedURL/stat caches. Everything from #5 onward is future work.
+**Already implemented:** the `core` substrate (nouns, Store, Meta, errors) and
+the full `blobstore` Store — streaming writes/reads with digest sidecars,
+listing verbs with dot-filtering, per-tag RMW with mutex, and the
+SignedURL/stat caches. Everything else is future work.
 
-Quality bar throughout: unit + integration tests are part of each issue, not a
-follow-up. See `AGENTS.md`.
+Quality bar throughout: unit + integration tests are part of each change, not a
+follow-up. See [`../AGENTS.md`](../AGENTS.md) for the working conventions and
+[`architecture.md`](architecture.md) for the design.

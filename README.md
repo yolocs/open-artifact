@@ -38,8 +38,8 @@ chainable noun handles, streaming uploads with rolling SHA256, listings,
 dist-tags, and a cached signed-URL redirect. The runtime, namespaces, auth,
 observability, proxy primitives, and the PyPI/npm/Maven surfaces are tracked
 as the **parity** issues on GitHub. See [`docs/vision.md`](docs/vision.md) for
-the narrative and [`AGENTS.md`](AGENTS.md) for the design pillars, storage
-model, and engineering standards.
+the narrative, [`docs/architecture.md`](docs/architecture.md) for the design,
+and [`AGENTS.md`](AGENTS.md) for how we work on the codebase.
 
 ## Layout
 
@@ -52,8 +52,8 @@ pkg/auth            OIDC authn + per-namespace authz
 pkg/surface         per-format inbound handler + upstream client (pypi, npm, maven) + admin
 ```
 
-See [`AGENTS.md`](AGENTS.md) for the authoritative design pillars, storage
-model, dependency rules, and engineering standards.
+See [`docs/architecture.md`](docs/architecture.md) for the design — invariants,
+dependency rule, storage model, and the per-surface contract.
 
 ## Develop
 
