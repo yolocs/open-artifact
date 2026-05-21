@@ -159,9 +159,9 @@ handles reachable from it.
 
 The scope string is *not* a literal like `pypi/global`. In the parity design
 the data-plane factory (#6) constructs a `blobstore.Store` bound to scope
-**`data/<namespace>/<format>`**, so packages for namespace `team-a`'s PyPI
-endpoint live under `open-artifact/v1/data/team-a/pypi/...`. `core` neither
-knows nor cares how the scope is computed.
+**`<namespace>/<format>`**, so packages for namespace `team-a`'s PyPI endpoint
+live under `open-artifact/v1/team-a/pypi/...`. `core` neither knows nor cares
+how the scope is computed.
 
 Sentinel errors (`ErrNotFound`, `ErrAlreadyExists`, `ErrDigestMismatch`,
 `ErrUnsupported`) live in `pkg/core/errors.go` and map to HTTP in a shared
@@ -172,41 +172,48 @@ Sentinel errors (`ErrNotFound`, `ErrAlreadyExists`, `ErrDigestMismatch`,
 Top-level prefix constant is **`open-artifact/v1/`**. When `--bucket-prefix`
 is set it is inserted right after the root: `open-artifact/v1/<prefix>/...`.
 
-**Package data** for a namespace+format (scope `data/<namespace>/<format>`),
-laid out by the existing blobstore path helpers:
+**The namespace is the canonical top-level partition.** Everything that
+belongs to a namespace lives under `open-artifact/v1/<ns>/` — there is no
+separate `data/`, `_control/`, or `_proxy-cache/` tree. A namespace's own
+metadata is the `.meta` object directly under it; package data is grouped by
+format below that:
 
 ```
-open-artifact/v1/data/<ns>/<fmt>/<package>/.meta                  ← package API object (optional)
-open-artifact/v1/data/<ns>/<fmt>/<package>/.tags/<tag>            ← one object per dist-tag; body = target version
-open-artifact/v1/data/<ns>/<fmt>/<package>/.cache/               ← package-scoped cache (opaque to Store)
-open-artifact/v1/data/<ns>/<fmt>/<package>/<version>/.meta        ← version API object (optional)
-open-artifact/v1/data/<ns>/<fmt>/<package>/<version>/.meta.<file> ← per-file API object (always present; holds digest)
-open-artifact/v1/data/<ns>/<fmt>/<package>/<version>/<file>       ← the file blob
+open-artifact/v1/<ns>/.meta                                  ← namespace metadata (mode, policy, proxy spec)
+open-artifact/v1/<ns>/.cache/...                             ← namespace-level cache (opaque to Store)
+open-artifact/v1/<ns>/<fmt>/.cache/...                       ← format-level cache, e.g. proxy pull-through
+open-artifact/v1/<ns>/<fmt>/<package>/.meta                  ← package API object (optional)
+open-artifact/v1/<ns>/<fmt>/<package>/.tags/<tag>            ← one object per dist-tag; body = target version
+open-artifact/v1/<ns>/<fmt>/<package>/.cache/...             ← package-scoped cache (opaque to Store)
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/.meta        ← version API object (optional)
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/.meta.<file> ← per-file API object (always present; holds digest)
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/<file>       ← the file blob
 ```
 
-**Control plane** (namespace catalog, soft-delete indexes — #6):
+The data-plane factory (#6) binds a `blobstore.Store` to scope `<ns>/<fmt>`;
+the blobstore path helpers lay out everything from `<package>` down. The
+namespace catalog (admin plane, #6) owns the `<ns>/.meta` object.
 
-```
-open-artifact/v1/_control/namespaces/<name>.json          ← namespace metadata
-open-artifact/v1/_control/namespace-index/<name>          ← index sentinel, body "present\n"
-open-artifact/v1/_control/package-index/<ns>/<fmt>/<pkg>  ← package index sentinel for delete-emptiness check
-```
+**No side indexes — listing is the index.** The namespace catalog is the
+top-level child listing under the root (drop dot-entries); a namespace
+*exists* once its `<ns>/.meta` is written, mirroring how a version exists once
+anything is written under it. Delete-emptiness is "no non-dot children under
+`<ns>/`". There are no `_control`/`namespace-index`/`package-index` sentinels.
 
-**Proxy cache** (mutable upstream cache for proxy namespaces — #17), under a
-prefix invisible to `core.Store` package/version/file listings:
-
-```
-open-artifact/v1/_proxy-cache/<ns>/<fmt>/index/<sha256(key)>.body
-open-artifact/v1/_proxy-cache/<ns>/<fmt>/index/<sha256(key)>.json
-```
+**Caches live in `.cache/`, at the level they apply** — namespace,
+format (proxy pull-through cache for proxy namespaces), or package. A proxy
+namespace caches upstream metadata+body under `<ns>/<fmt>/.cache/...`
+(e.g. `<sha256(key)>.body` + `<sha256(key)>.json`). Everything under a
+`.cache/` is opaque to `core.Store` and never appears in package/version/file
+listings.
 
 **Reserved-name discipline — one rule, every level.** A leading `.` is
 reserved at every directory level; listings drop dot-entries when enumerating
-real children. The internal control/proxy prefixes (`_control`,
-`_proxy-cache`, `data`) and the reserved namespace names live above the data
-scope and never collide with user package data. The format codec in each
-surface **must reject** leading `.`, `..`, absolute paths, empty path
-segments, and names that would collide with internal prefixes, in
+real children (namespaces, formats, packages, versions, files). Because
+namespace names may not begin with `.` or `_` (see name validation below) and
+formats are a fixed allow-list, namespace/format directories never collide
+with the dot-prefixed metadata/cache objects. The format codec in each surface
+**must reject** leading `.`, `..`, absolute paths, and empty path segments in
 user-provided package/version/file/tag names — so user data is never silently
 hidden.
 
@@ -260,8 +267,9 @@ Structured request logs carry stable fields and never log `Authorization`.
 ## Proxy primitives (planned, #17)
 
 Shared, format-agnostic pull-through machinery: a context-aware upstream HTTP
-client with body caps, a blob-backed mutable metadata+body cache under
-`_proxy-cache/`, an in-memory negative cache for upstream 404s, process-local
+client with body caps, a blob-backed mutable metadata+body cache under the
+format-level `<ns>/<fmt>/.cache/`, an in-memory negative cache for upstream
+404s, process-local
 singleflight for cold fills, and an ordered allow/deny/delay filter chain
 validated as part of namespace spec validation. Cold-miss bytes flow through
 open-artifact (never redirect clients to public upstream URLs); cache hits may

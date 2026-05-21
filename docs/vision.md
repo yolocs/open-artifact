@@ -69,7 +69,7 @@ package manager ──HTTP──▶ surface (pypi|npm|maven) ──▶ namespace
   facade-transparent SignedURL / stat caches.
 - **`pkg/namespace`** — namespace model, blob-backed catalog (admin CRUD),
   and the data-plane factory that yields `core.Store` handles scoped to
-  `data/<namespace>/<format>`.
+  `<namespace>/<format>`.
 - **`pkg/auth`** — OIDC authenticators, a multi-issuer chain, edge
   middleware, and the per-namespace authorizer enforced below the surfaces.
 - **`pkg/proxy`** — shared pull-through primitives: upstream HTTP client,
@@ -92,24 +92,28 @@ namespace/auth/proxy detail, and the gocloud usage notes.
 
 ## Storage model (summary)
 
-Everything lives under the `open-artifact/v1/` root (with an optional
-`--bucket-prefix` inserted right after it):
+The namespace is the canonical top-level partition: everything that belongs to
+a namespace lives under `open-artifact/v1/<ns>/` (with an optional
+`--bucket-prefix` inserted right after the `v1/` root). There is no separate
+`data/`, `_control/`, or `_proxy-cache/` tree.
 
 ```
-open-artifact/v1/_control/namespaces/<name>.json            ← namespace metadata
-open-artifact/v1/_control/namespace-index/<name>            ← index sentinel
-open-artifact/v1/data/<ns>/<fmt>/<package>/<version>/<file>        ← package blob
-open-artifact/v1/data/<ns>/<fmt>/<package>/<version>/.meta.<file>  ← per-file API object (digest, etc.)
-open-artifact/v1/data/<ns>/<fmt>/<package>/.tags/<tag>            ← one object per dist-tag; body = target version
-open-artifact/v1/_proxy-cache/<ns>/<fmt>/index/<hash>.body        ← proxy cache (proxy namespaces)
+open-artifact/v1/<ns>/.meta                                       ← namespace metadata (mode, policy, proxy)
+open-artifact/v1/<ns>/<fmt>/.cache/<hash>.body                    ← proxy cache (proxy namespaces)
+open-artifact/v1/<ns>/<fmt>/<package>/.tags/<tag>                 ← one object per dist-tag; body = target version
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/<file>            ← package blob
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/.meta.<file>      ← per-file API object (digest, etc.)
 ```
 
 A leading `.` is reserved at every level and stripped from listings; surfaces
-reject user names that start with `.` (or contain `..`, absolute paths, empty
-segments, or internal-prefix collisions). A version "exists" once anything is
-written under it — partial publishes are observable, matching real PyPI/npm.
-Dist-tags are independent objects under `.tags/` whose body is the target
-version (there is no shared JSON tags map).
+reject user names that start with `.` (or contain `..`, absolute paths, or
+empty segments). The namespace catalog is just the top-level listing — a
+namespace "exists" once its `.meta` is written, and a version "exists" once
+anything is written under it; partial publishes are observable, matching real
+PyPI/npm. Caches live in a `.cache/` folder at the level they apply
+(namespace, format, or package) and are opaque to `core.Store`. Dist-tags are
+independent objects under `.tags/` whose body is the target version (there is
+no shared JSON tags map).
 
 ## Non-goals / deferred (v1)
 
