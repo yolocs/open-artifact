@@ -3,9 +3,8 @@
 The design reference for open-artifact: what the pieces are, how they fit, and
 the invariants that hold them together. This is a **living document** — keep it
 current as the design evolves, and update it in the same change as the behavior
-it describes. For the product rationale and parity target see
-[`vision.md`](vision.md); for how we work on the project see
-[`../AGENTS.md`](../AGENTS.md).
+it describes. For how we work on the project see [`../AGENTS.md`](../AGENTS.md);
+the roadmap lives in GitHub issues.
 
 This describes the target architecture. The `core` substrate and its
 `blobstore` implementation exist today; the runtime, namespaces, auth,
@@ -331,3 +330,18 @@ shapes, and test layout.
    a real-client end-to-end test through the harness.
 6. Operator notes in `docs/`; flags/env for upstream URL, upload caps, and
    cache TTLs.
+
+## Non-goals / deferred (v1)
+
+- **Deletion / yank / unpublish of packages** — semantics differ across
+  formats; a separate design pass. (Deleting an *empty* namespace is supported;
+  emptiness is derived from listing, not a side index.)
+- **Multi-replica `SetTag`** — v1 guards the per-tag read-modify-write with an
+  in-process mutex; multi-replica needs CAS / conditional writes at the bucket
+  layer.
+- **Static username/password auth** — OIDC only in v1.
+- **Serving multiple formats from one process** — v1 serves exactly one format
+  per `serve` process; run separate processes for separate endpoints.
+- **SSE-C / per-blob-key encrypted buckets**, cross-region failover, external
+  blob paths — revisit when a concrete requirement lands.
+- **The `artctl` client binary** — server first; deferred to post-parity.

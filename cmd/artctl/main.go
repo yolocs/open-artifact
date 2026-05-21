@@ -2,7 +2,7 @@
 // workflows.
 //
 // Deferred: the client is intentionally a later deliverable. This scaffold
-// only reserves the binary's place in the layout. See docs/vision.md.
+// only reserves the binary's place in the layout. See docs/architecture.md.
 package main
 
 import (

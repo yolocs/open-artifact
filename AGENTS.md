@@ -2,8 +2,8 @@
 
 How we work on **open-artifact** — the principles and conventions for changing
 this codebase. It is deliberately high level. The detailed design lives in
-[`docs/architecture.md`](docs/architecture.md); the product rationale and
-parity target live in [`docs/vision.md`](docs/vision.md).
+[`docs/architecture.md`](docs/architecture.md); the roadmap lives in GitHub
+issues.
 
 open-artifact is a lightweight, stateless, multi-format artifact registry
 (PyPI, npm, Maven) backed by a single `gocloud.dev/blob` bucket — no database,

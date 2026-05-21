@@ -37,9 +37,9 @@ Core storage substrate (`pkg/core` + `pkg/core/blobstore`) is implemented:
 chainable noun handles, streaming uploads with rolling SHA256, listings,
 dist-tags, and a cached signed-URL redirect. The runtime, namespaces, auth,
 observability, proxy primitives, and the PyPI/npm/Maven surfaces are tracked
-as the **parity** issues on GitHub. See [`docs/vision.md`](docs/vision.md) for
-the narrative, [`docs/architecture.md`](docs/architecture.md) for the design,
-and [`AGENTS.md`](AGENTS.md) for how we work on the codebase.
+as the **parity** issues on GitHub. See
+[`docs/architecture.md`](docs/architecture.md) for the design and
+[`AGENTS.md`](AGENTS.md) for how we work on the codebase.
 
 ## Layout
 
