@@ -3,6 +3,7 @@ package command
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -39,12 +40,18 @@ type runtimeConfig struct {
 	LogFormat     string
 	LogDebug      bool
 
-	// Data-plane only. Stubbed here; fully consumed by later issues.
+	// Data-plane only. The authenticator is built from these by the serve
+	// wiring; format routes (#25) install the middleware.
 	RepoType          string
 	DisableAuthn      bool
 	AuthnKind         string
 	AuthnOIDCIssuers  []string
 	AuthnOIDCAudience string
+
+	// authnKindSet records whether --authn-kind was set explicitly (by flag or
+	// env) rather than left at its default, so it can be flagged as mutually
+	// exclusive with --disable-authn.
+	authnKindSet bool
 }
 
 // addSharedFlags registers the flags present on both planes. defaultPort
@@ -110,6 +117,8 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.AuthnKind = strings.TrimSpace(v.GetString("authn-kind"))
 		cfg.AuthnOIDCIssuers = splitCSV(v.GetStringSlice("authn-oidc-issuers"))
 		cfg.AuthnOIDCAudience = strings.TrimSpace(v.GetString("authn-oidc-audience"))
+		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
+		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
 
 	if err := cfg.validate(dataPlane); err != nil {
@@ -146,12 +155,38 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		if c.RepoType != "" && !repoTypes[c.RepoType] {
 			errs = append(errs, fmt.Errorf("unsupported --repo-type %q: want pypi, npm, or maven", c.RepoType))
 		}
-		if c.AuthnKind != "" && c.AuthnKind != "oidc" {
-			errs = append(errs, fmt.Errorf("unsupported --authn-kind %q: want oidc", c.AuthnKind))
-		}
+		errs = append(errs, c.validateAuthn()...)
 	}
 
 	return errors.Join(errs...)
+}
+
+// validateAuthn enforces that the data plane starts only with a usable
+// authentication configuration: either authn is explicitly disabled, or the
+// OIDC authenticator has both issuers and an audience. --disable-authn and an
+// explicit --authn-kind are mutually exclusive.
+func (c *runtimeConfig) validateAuthn() []error {
+	var errs []error
+	if c.DisableAuthn {
+		if c.authnKindSet {
+			errs = append(errs, errors.New("--disable-authn and --authn-kind are mutually exclusive"))
+		}
+		return errs
+	}
+	switch c.AuthnKind {
+	case "oidc":
+		if len(c.AuthnOIDCIssuers) == 0 {
+			errs = append(errs, errors.New("--authn-kind=oidc requires --authn-oidc-issuers (or OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS)"))
+		}
+		if c.AuthnOIDCAudience == "" {
+			errs = append(errs, errors.New("--authn-kind=oidc requires --authn-oidc-audience (or OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE)"))
+		}
+	case "":
+		errs = append(errs, errors.New("authentication is required: set --disable-authn or --authn-kind=oidc"))
+	default:
+		errs = append(errs, fmt.Errorf("unsupported --authn-kind %q: want oidc", c.AuthnKind))
+	}
+	return errs
 }
 
 // validateBucketPrefix accepts an empty prefix or a clean relative,

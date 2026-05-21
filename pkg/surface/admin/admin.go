@@ -117,6 +117,7 @@ func statusFor(err error) int {
 	switch {
 	case errors.Is(err, namespace.ErrInvalidName),
 		errors.Is(err, namespace.ErrInvalidProxy),
+		errors.Is(err, namespace.ErrInvalidPolicy),
 		errors.Is(err, namespace.ErrUnsupportedSchemaVersion):
 		return http.StatusBadRequest
 	case errors.Is(err, namespace.ErrNotFound):

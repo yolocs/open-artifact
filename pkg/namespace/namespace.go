@@ -52,19 +52,32 @@ type FilterSpec struct {
 	Pattern string `json:"pattern,omitempty"`
 }
 
-// Policy lists the subject matchers that may read or write the namespace. An
-// empty policy is deny-all; matcher validation and enforcement are owned by
-// #7.
+// Subject-matcher kinds. The empty kind is equivalent to KindOIDC. KindBasicToken
+// is reserved for a future static-token credential and is rejected in v1.
+const (
+	KindOIDC       = "oidc"
+	KindBasicToken = "basictoken"
+)
+
+// Policy lists the subject matchers that may read or write the namespace.
+// Readers and Writers are independent — write does not imply read — and an
+// empty policy is deny-all.
 type Policy struct {
 	Readers []SubjectMatcher `json:"readers,omitempty"`
 	Writers []SubjectMatcher `json:"writers,omitempty"`
 }
 
 // SubjectMatcher matches an authenticated subject against a namespace policy.
-// The match semantics are owned by #7; here it only needs to round-trip.
+// A populated field constrains the match; all populated fields within a matcher
+// are ANDed. Issuer and Email compare for equality; SubMatch and every
+// ClaimsMatch value are RE2 regexes anchored at both ends. An empty Kind means
+// KindOIDC.
 type SubjectMatcher struct {
-	Issuer  string `json:"issuer,omitempty"`
-	Subject string `json:"subject,omitempty"`
+	Issuer      string            `json:"issuer,omitempty"`
+	SubMatch    string            `json:"sub_match,omitempty"`
+	Email       string            `json:"email,omitempty"`
+	ClaimsMatch map[string]string `json:"claims_match,omitempty"`
+	Kind        string            `json:"kind,omitempty"`
 }
 
 // IsProxy reports whether the spec selects proxy mode.

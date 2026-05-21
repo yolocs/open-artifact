@@ -19,6 +19,10 @@ var (
 	// invalid (unknown mode, missing/invalid upstream, or a proxy block on a
 	// hosted namespace).
 	ErrInvalidProxy = errors.New("namespace: invalid proxy")
+	// ErrInvalidPolicy is returned when a spec's policy carries a malformed
+	// subject matcher (empty matcher, unknown/reserved kind, empty claim key,
+	// or a regex that does not compile).
+	ErrInvalidPolicy = errors.New("namespace: invalid policy")
 	// ErrNotFound is returned when a namespace does not exist.
 	ErrNotFound = errors.New("namespace: not found")
 	// ErrNotEmpty is returned when deleting a namespace that still holds
@@ -92,6 +96,10 @@ func normalizeForWrite(spec Spec) (Spec, error) {
 		}
 	default:
 		return Spec{}, fmt.Errorf("%w: unknown mode %q", ErrInvalidProxy, spec.Mode)
+	}
+
+	if _, err := compilePolicy(spec.Policy); err != nil {
+		return Spec{}, err
 	}
 
 	return spec, nil
