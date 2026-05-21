@@ -6,11 +6,12 @@ current as the design evolves, and update it in the same change as the behavior
 it describes. For how we work on the project see [`../AGENTS.md`](../AGENTS.md);
 the roadmap lives in GitHub issues.
 
-This describes the target architecture. The `core` substrate and its
-`blobstore` implementation exist today; the runtime, namespaces, auth,
-observability, proxy primitives, and the format surfaces are described here as
-the design they are being built toward. Where it matters, sections note what is
-implemented versus planned.
+This describes the target architecture. The `core` substrate with its
+`blobstore` implementation and the runtime foundation (CLI, bucket opener,
+logging, server lifecycle) exist today; namespaces, auth, observability, proxy
+primitives, and the format surfaces are described here as the design they are
+being built toward. Where it matters, sections note what is implemented versus
+planned.
 
 ## What this project is
 
@@ -99,12 +100,17 @@ Implemented today is in **plain text**; planned packages are marked
 
 ```
 cmd/
-  open-artifact/     ← single binary: `serve` + `admin serve` (planned; today scaffolded under cmd/server)
+  open-artifact/     ← single binary: `serve` + `admin serve`
   artctl/            ← admin/inspection CLI (deferred to post-parity)
+internal/
+  cli/               ← cobra/viper command tree, config resolution + validation
+  bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
+  server/            ← shared HTTP server lifecycle (graceful shutdown)
+  version/           ← single source of build identity
 pkg/
   core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
     blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
-  logging/           ← slog setup, context helpers, stable fields (planned)
+  logging/           ← slog setup, context helpers, stable fields
   namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory (planned)
   auth/              ← Authenticator/Authorizer, middleware, sentinels (planned)
     oidc/            ← OIDC discovery + token verification (planned)
@@ -116,7 +122,6 @@ pkg/
     pypi/            ← PEP 503/691 hosted + proxy (planned)
     npm/             ← npm registry hosted + proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
-internal/version/    ← single source of build identity
 docs/
 ```
 
@@ -289,17 +294,22 @@ populate cache.
 - `bucket.List` with a delimiter gives the directory children for the listing
   verbs; sort caller-side if order matters.
 
-## The CLI (planned)
+## The CLI (implemented)
 
 Single binary `open-artifact`; cobra for commands, viper for flag/env
 resolution. Subcommands: `serve` (data plane, default port 8080) and
 `admin serve` (control plane, default port 8081). `--version` prints version,
 commit, and `GOOS/GOARCH`. Every flag has a matching env var (prefix
-`OPEN_ARTIFACT`, dashes → underscores; platform `PORT` → `--port`); no config
-files. The root command uses `SilenceUsage`/`SilenceErrors` so errors are
-testable, validates config at startup, and fails with clear, joined errors.
-The `artctl` client (deferred to post-parity) talks HTTP only and never opens
-a bucket.
+`OPEN_ARTIFACT`, dashes → underscores; platform `PORT` → `--port`, with
+`OPEN_ARTIFACT_PORT` taking precedence); no config files. The root command uses
+`SilenceUsage`/`SilenceErrors` so errors are testable; each command validates
+config at startup and fails with clear, joined errors. Data-plane-only flags
+(`--repo-type`, `--disable-authn`, `--authn-*`) live on `serve` and are stubbed
+here for later issues. The command layer is the only place that opens a bucket
+and registers blob drivers (`internal/bucket`); the logger (`pkg/logging`) and
+HTTP server lifecycle (`internal/server`) are shared by both planes. The
+`artctl` client (deferred to post-parity) talks HTTP only and never opens a
+bucket.
 
 ## Adding a new surface
 
