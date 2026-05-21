@@ -2,8 +2,10 @@ package command
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/spf13/cobra"
+	"gocloud.dev/blob"
 )
 
 // newServeCommand builds the data-plane `serve` command.
@@ -21,7 +23,10 @@ func newServeCommand(run runFunc) *cobra.Command {
 	return cmd
 }
 
-// runServe is the real data-plane run function.
+// runServe is the real data-plane run function. Format routing, namespaces,
+// and auth are wired by later issues.
 func runServe(ctx context.Context, cfg *runtimeConfig) error {
-	return serve(ctx, cfg, "serve")
+	return serve(ctx, cfg, "serve", func(*blob.Bucket) (http.Handler, error) {
+		return http.NewServeMux(), nil
+	})
 }
