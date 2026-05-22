@@ -154,6 +154,14 @@ func (s *Store) List(ctx context.Context) ([]*Namespace, error) {
 	return out, nil
 }
 
+// Ping proves the namespace catalog is reachable by listing the top-level
+// child directories (the catalog index) without loading any metadata. It backs
+// admin-plane readiness.
+func (s *Store) Ping(ctx context.Context) error {
+	_, err := s.listChildDirs(ctx, s.root)
+	return err
+}
+
 // Delete removes an empty namespace's .meta object. It returns ErrNotFound if
 // the namespace does not exist and ErrNotEmpty if it still holds package data.
 func (s *Store) Delete(ctx context.Context, name string) error {

@@ -8,7 +8,9 @@ import (
 	"gocloud.dev/blob"
 
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/metrics"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/admin"
 )
 
@@ -41,13 +43,16 @@ func newAdminServeCommand(run runFunc) *cobra.Command {
 // runAdminServe is the real control-plane run function. It mounts the
 // namespace CRUD API backed by the blob-bucket catalog.
 func runAdminServe(ctx context.Context, cfg *runtimeConfig) error {
-	return serve(ctx, cfg, "admin", func(bkt *blob.Bucket) (http.Handler, error) {
+	return serve(ctx, cfg, "admin", func(bkt *blob.Bucket, _ metrics.Recorder) (planeHandler, error) {
 		store, err := namespace.NewStore(bkt, cfg.BucketPrefix)
 		if err != nil {
-			return nil, err
+			return planeHandler{}, err
 		}
 		mux := http.NewServeMux()
-		mux.Handle("/admin/v1/", admin.Handler(store, logging.FromContext(ctx)))
-		return mux, nil
+		mux.Handle("/admin/v1/", observability.WrapWithFormat("admin", admin.Handler(store, logging.FromContext(ctx))))
+		return planeHandler{
+			handler: mux,
+			pinger:  store.Ping,
+		}, nil
 	})
 }

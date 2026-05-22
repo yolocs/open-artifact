@@ -16,7 +16,7 @@ import (
 // readTagTarget reads the target version recorded for a single dist-tag,
 // mapping a missing object to ErrNotFound via mapErr.
 func (s *Store) readTagTarget(ctx context.Context, pkg, tag string) (string, error) {
-	raw, err := s.bucket.ReadAll(ctx, tagPath(s.scope, pkg, tag))
+	raw, err := s.bReadAll(ctx, tagPath(s.scope, pkg, tag))
 	if err != nil {
 		return "", fmt.Errorf("blobstore: read tag %q/%q: %w", pkg, tag, mapErr(err))
 	}
@@ -25,7 +25,7 @@ func (s *Store) readTagTarget(ctx context.Context, pkg, tag string) (string, err
 
 // writeTagTarget points a dist-tag at target by writing the single tag object.
 func (s *Store) writeTagTarget(ctx context.Context, pkg, tag, target string) error {
-	if err := s.bucket.WriteAll(ctx, tagPath(s.scope, pkg, tag), []byte(target), nil); err != nil {
+	if err := s.bWriteAll(ctx, tagPath(s.scope, pkg, tag), []byte(target), nil); err != nil {
 		return fmt.Errorf("blobstore: write tag %q/%q: %w", pkg, tag, mapErr(err))
 	}
 	return nil

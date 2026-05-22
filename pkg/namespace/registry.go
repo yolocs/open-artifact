@@ -33,6 +33,7 @@ type Registry struct {
 	prefix  string
 	catalog *Store
 	cache   *policyCache
+	metrics blobstore.Metrics
 
 	// loadGate is a test seam invoked at the start of a cache miss load,
 	// before any I/O. It lets tests prove singleflight collapses concurrent
@@ -53,6 +54,13 @@ func WithPolicyCacheTTL(ttl time.Duration) RegistryOption {
 // withClock overrides the cache clock (tests only).
 func withClock(now func() time.Time) RegistryOption {
 	return func(r *Registry) { r.cache.now = now }
+}
+
+// WithMetrics installs a blob-backend metrics observer on every scoped
+// core.Store the Registry yields, so backend calls made through the data plane
+// are instrumented.
+func WithMetrics(m blobstore.Metrics) RegistryOption {
+	return func(r *Registry) { r.metrics = m }
 }
 
 // withLoadGate sets the cache-miss load seam (tests only).
@@ -124,6 +132,9 @@ func (s *Scoped) Store() (core.Store, error) {
 	var opts []blobstore.Option
 	if s.guard != nil {
 		opts = append(opts, blobstore.WithGuard(s.guard))
+	}
+	if s.registry.metrics != nil {
+		opts = append(opts, blobstore.WithMetrics(s.registry.metrics))
 	}
 	return blobstore.NewWithBucket(s.registry.bucket, scope, opts...)
 }

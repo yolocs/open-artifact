@@ -9,8 +9,11 @@ import (
 	"gocloud.dev/blob"
 
 	"github.com/yolocs/open-artifact/pkg/auth"
+	"github.com/yolocs/open-artifact/pkg/core/blobstore"
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/metrics"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/echo"
 )
 
@@ -34,20 +37,38 @@ func newServeCommand(run runFunc) *cobra.Command {
 // (#25) installs the auth middleware and the authorized stores inside the
 // format routes.
 func runServe(ctx context.Context, cfg *runtimeConfig) error {
-	return serve(ctx, cfg, "serve", func(bkt *blob.Bucket) (http.Handler, error) {
+	return serve(ctx, cfg, "serve", func(bkt *blob.Bucket, recorder metrics.Recorder) (planeHandler, error) {
 		logger := logging.FromContext(ctx)
 		authn := buildAuthenticator(cfg, logger)
 
 		catalog, err := namespace.NewStore(bkt, cfg.BucketPrefix)
 		if err != nil {
-			return nil, err
+			return planeHandler{}, err
 		}
-		reg, err := namespace.NewRegistry(bkt, cfg.BucketPrefix, catalog)
+		reg, err := namespace.NewRegistry(bkt, cfg.BucketPrefix, catalog, namespace.WithMetrics(recorder))
 		if err != nil {
-			return nil, err
+			return planeHandler{}, err
 		}
-		return buildDataPlaneHandler(cfg, reg, authn, logger), nil
+		return planeHandler{
+			handler: buildDataPlaneHandler(cfg, reg, authn, logger),
+			pinger:  bucketPinger(bkt, cfg.BucketPrefix),
+		}, nil
 	})
+}
+
+// bucketPinger proves the data-plane bucket is reachable by probing for a
+// sentinel object under the deployment root. A missing object is reachable
+// (false, nil); only a backend/transport error is a readiness failure.
+func bucketPinger(bkt *blob.Bucket, bucketPrefix string) observability.Pinger {
+	key := blobstore.Root
+	if bucketPrefix != "" {
+		key += bucketPrefix + "/"
+	}
+	key += ".readyz-probe"
+	return func(ctx context.Context) error {
+		_, err := bkt.Exists(ctx, key)
+		return err
+	}
 }
 
 // buildDataPlaneHandler assembles the data-plane HTTP handler. The real package

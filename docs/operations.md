@@ -45,8 +45,8 @@ within a bounded window (15s) before exiting.
 | `--port`            | `OPEN_ARTIFACT_PORT` / `PORT`  | `8080` serve, `8081` admin | 1–65535. |
 | `--bucket-url`      | `OPEN_ARTIFACT_BUCKET_URL`     | — (required)               | gocloud.dev/blob URL; see backends below. |
 | `--bucket-prefix`   | `OPEN_ARTIFACT_BUCKET_PREFIX`  | _(empty)_                  | Scopes one deployment within a shared bucket; see rules below. |
-| `--enable-metrics`  | `OPEN_ARTIFACT_ENABLE_METRICS` | `true`                     | _(endpoint behavior planned, #16)_ |
-| `--metrics-path`    | `OPEN_ARTIFACT_METRICS_PATH`   | `/metrics`                 | Must start with `/`. _(planned, #16)_ |
+| `--enable-metrics`  | `OPEN_ARTIFACT_ENABLE_METRICS` | `true`                     | When false, the metrics path returns 404 and no series are collected. |
+| `--metrics-path`    | `OPEN_ARTIFACT_METRICS_PATH`   | `/metrics`                 | Must start with `/`. Prometheus exposition when metrics are enabled. |
 | `--log-level`       | `OPEN_ARTIFACT_LOG_LEVEL`      | `info`                     | `debug`, `info`, `warn`, `error`. |
 | `--log-format`      | `OPEN_ARTIFACT_LOG_FORMAT`     | `text`                     | `text` or `json`. |
 | `--log-debug`       | `OPEN_ARTIFACT_LOG_DEBUG`      | `false`                    | Adds caller/source location to records. |
@@ -101,11 +101,25 @@ Structured logs via `log/slog`, written to stderr.
   `format`, `op`, `path`, `method`, `status`, `duration`, `error`.
 - Credentials are never logged (the `Authorization` header is never emitted).
 
-## Health and metrics _(planned, #16)_
+## Health and metrics
 
-Liveness (`/healthz`), readiness (`/readyz`), and the metrics endpoint
-(`--metrics-path`, default `/metrics`) are reserved here via flags; their
-handlers and probe behavior are delivered by the observability work.
+Both planes wrap their handler with observability endpoints, reachable without
+authentication:
+
+- `GET /healthz` → `200` with body `ok\n`; `HEAD /healthz` → `200` no body. No
+  backend call.
+- `GET /readyz` → probes the backend (data plane: bucket reachable; admin:
+  namespace catalog listable) with a 2s timeout and a 1s success cache, and
+  returns JSON with `status`, `backend`, and build identity. On a backend
+  failure it returns `503` with a generic, secret-free `error`. `HEAD /readyz`
+  returns the same status with no body.
+- `--metrics-path` (default `/metrics`) serves Prometheus exposition when
+  `--enable-metrics` is true; otherwise it returns `404`.
+
+Metrics use the `open_artifact_` prefix: `http_*` (labels `format`, `op`,
+`status`) for requests, `blob_backend_*` (labels `op`, `status`) for backend
+calls, and `blob_redirect_total` (label `outcome`) for download decisions. With
+a fresh registry the exposition also includes Go and process collectors.
 
 ## Admin API
 
