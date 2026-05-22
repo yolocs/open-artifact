@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/spf13/cobra"
@@ -10,6 +11,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/logging"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/surface/echo"
 )
 
 // newServeCommand builds the data-plane `serve` command.
@@ -44,14 +46,19 @@ func runServe(ctx context.Context, cfg *runtimeConfig) error {
 		if err != nil {
 			return nil, err
 		}
-		return buildDataPlaneHandler(reg, authn), nil
+		return buildDataPlaneHandler(cfg, reg, authn, logger), nil
 	})
 }
 
-// buildDataPlaneHandler assembles the data-plane HTTP handler. Format routes are
-// wired in #25; they will guard each route with auth.Middleware(authn) and
-// reach storage through reg.Authorized so authentication and per-namespace
-// authorization are enforced together.
-func buildDataPlaneHandler(reg *namespace.Registry, authn auth.Authenticator) http.Handler {
-	return http.NewServeMux()
+// buildDataPlaneHandler assembles the data-plane HTTP handler. The real package
+// formats (#19-#25) will mount here, each guarding its routes with
+// auth.Middleware(authn) and reaching storage through reg.Authorized so
+// authentication and per-namespace authorization are enforced together. Until
+// then the "echo" diagnostic surface exercises that same stack end to end.
+func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn auth.Authenticator, logger *slog.Logger) http.Handler {
+	mux := http.NewServeMux()
+	if cfg.RepoType == "echo" {
+		mux.Handle("/", echo.Handler(reg, authn, logger))
+	}
+	return mux
 }

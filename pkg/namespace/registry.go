@@ -104,6 +104,11 @@ type Scoped struct {
 	registry  *Registry
 	namespace string
 	format    string
+
+	// guard, when set, is installed on the scoped core.Store so every
+	// read/write is authorized. It is set by Registry.Authorized; the raw
+	// Store() (no guard) is reserved for trusted, internal callers.
+	guard blobstore.Guard
 }
 
 // Namespace returns the namespace name this handle is bound to.
@@ -116,7 +121,11 @@ func (s *Scoped) Format() string { return s.format }
 // path-safe by construction: namespace names and format names are validated.
 func (s *Scoped) Store() (core.Store, error) {
 	scope := scopeOf(s.registry.prefix, s.namespace, s.format)
-	return blobstore.NewWithBucket(s.registry.bucket, scope)
+	var opts []blobstore.Option
+	if s.guard != nil {
+		opts = append(opts, blobstore.WithGuard(s.guard))
+	}
+	return blobstore.NewWithBucket(s.registry.bucket, scope, opts...)
 }
 
 // Spec returns the namespace spec for mode/proxy dispatch. An unknown

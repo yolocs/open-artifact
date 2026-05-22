@@ -1,0 +1,114 @@
+name: OIDC E2E
+
+# Exercises the full front door against a running open-artifact data plane using
+# a real GitHub Actions OIDC token. The data plane runs the "echo" diagnostic
+# surface, which authenticates the token and authorizes a namespace-scoped
+# read/write — proving authn + per-namespace authz end to end before the real
+# package formats exist.
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required to mint the OIDC token
+
+jobs:
+  oidc-e2e:
+    runs-on: ubuntu-latest
+    env:
+      ISSUER: https://token.actions.githubusercontent.com
+      AUDIENCE: open-artifact
+      BUCKET_URL: file:///tmp/oa-bucket
+      ADMIN: http://localhost:8081
+      DATA: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build binary
+        run: go build -o /tmp/open-artifact ./cmd/open-artifact
+
+      - name: Start admin plane
+        run: |
+          mkdir -p /tmp/oa-bucket
+          OPEN_ARTIFACT_BUCKET_URL="$BUCKET_URL" \
+            /tmp/open-artifact admin serve --port 8081 >/tmp/admin.log 2>&1 &
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$ADMIN/admin/v1/namespaces" || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          curl -sf "$ADMIN/admin/v1/namespaces" >/dev/null || { echo "admin plane did not start"; cat /tmp/admin.log; exit 1; }
+
+      - name: Create namespaces
+        run: |
+          set -euo pipefail
+          # ci-reader grants this repo's OIDC subject read; ci-deny grants nothing.
+          curl -sf -X PUT "$ADMIN/admin/v1/namespaces/ci-reader" \
+            -H 'Content-Type: application/json' \
+            --data "{\"policy\":{\"readers\":[{\"issuer\":\"$ISSUER\",\"sub_match\":\"repo:${GITHUB_REPOSITORY}:.*\"}]}}" \
+            -o /dev/null -w 'ci-reader: %{http_code}\n'
+          curl -sf -X PUT "$ADMIN/admin/v1/namespaces/ci-deny" \
+            -H 'Content-Type: application/json' --data '{}' \
+            -o /dev/null -w 'ci-deny: %{http_code}\n'
+
+      - name: Start data plane
+        run: |
+          OPEN_ARTIFACT_BUCKET_URL="$BUCKET_URL" \
+            /tmp/open-artifact serve --port 8080 \
+              --repo-type echo \
+              --authn-kind oidc \
+              --authn-oidc-issuers "$ISSUER" \
+              --authn-oidc-audience "$AUDIENCE" >/tmp/data.log 2>&1 &
+          # An unauthenticated request returns 401 once the server is listening.
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$DATA/ci-reader/echo" || true)
+            [ "$code" = "401" ] && break
+            sleep 1
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$DATA/ci-reader/echo" || true)
+          [ "$code" = "401" ] || { echo "data plane did not start (got $code)"; cat /tmp/data.log; exit 1; }
+
+      - name: Mint OIDC token
+        run: |
+          set -euo pipefail
+          VALUE=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -r '.value')
+          [ -n "$VALUE" ] && [ "$VALUE" != "null" ] || { echo "failed to mint OIDC token"; exit 1; }
+          echo "::add-mask::$VALUE"
+          echo "OIDC_TOKEN=$VALUE" >> "$GITHUB_ENV"
+
+      - name: Run authn/authz matrix
+        run: |
+          set -uo pipefail
+          fail=0
+          assert() {
+            local desc="$1" want="$2"; shift 2
+            local code
+            code=$(curl -s -o /tmp/body -w '%{http_code}' "$@")
+            if [ "$code" != "$want" ]; then
+              echo "FAIL: $desc: got $code want $want; body=$(cat /tmp/body)"
+              fail=1
+            else
+              echo "ok: $desc ($code)"
+            fi
+          }
+          AUTH="Authorization: Bearer $OIDC_TOKEN"
+
+          assert "valid token reads ci-reader" 200 -H "$AUTH" "$DATA/ci-reader/echo"
+          grep -q "$ISSUER" /tmp/body || { echo "FAIL: echo body missing issuer: $(cat /tmp/body)"; fail=1; }
+
+          assert "missing credential is 401" 401 "$DATA/ci-reader/echo"
+          assert "garbage token is 401" 401 -H "Authorization: Bearer not.a.jwt" "$DATA/ci-reader/echo"
+          assert "reader cannot write (403)" 403 -X PUT -H "$AUTH" "$DATA/ci-reader/echo"
+          assert "deny-all namespace is 403" 403 -H "$AUTH" "$DATA/ci-deny/echo"
+          assert "unknown namespace is 404" 404 -H "$AUTH" "$DATA/ci-ghost/echo"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "---- data plane log ----"; cat /tmp/data.log
+            exit 1
+          fi

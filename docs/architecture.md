@@ -306,17 +306,31 @@ independent (write does not imply read), an empty policy is deny-all, a nil
 `AuthContext` is unauthorized, and an unknown op is `ErrUnknownOp`. Policy
 validation happens at admin write time and maps to 400.
 
-Enforcement lives **below** the surface protocol code: `Registry.Authorized`
-returns a namespace-and-format-scoped `core.Store` whose every read/write op is
-authorized against the namespace's compiled policy before reaching storage
-(`OpRead` for existence/listing/read/download-url/tag-ref, `OpWrite` for
-add/annotate/set-tag). An unknown namespace maps to namespace `ErrNotFound`
-(404); a denied op maps to `auth.ErrUnauthorized` (403). The compiled policy is
-served from a per-namespace cache (default 60s, including a negative entry for
-missing namespaces) that collapses concurrent misses with singleflight and is
-invalidated immediately by the catalog's `OnChange` hook on admin `Put`/`Delete`
-within a process; across processes the TTL bounds staleness.
-`WithPolicyCacheTTL(0)` disables the cache.
+Enforcement lives **below** the surface protocol code and **inside** the
+storage handle rather than in a decorator: `blobstore.Store` exposes a generic,
+auth-agnostic `Guard` hook (`func(ctx, write bool) error`) that it consults at
+the start of every read/write before touching the bucket. `pkg/core` therefore
+still imports nothing from `auth` — the namespace layer supplies a `Guard` that
+closes over the compiled policy and the request's subject. `Registry.Authorized`
+resolves the namespace, binds that guard, and returns a namespace-and-format
+scoped `core.Store`; the guard maps reads to `OpRead`
+(existence/listing/read/download-url/tag-ref) and writes to `OpWrite`
+(add/annotate/set-tag). Because the check is in the store itself, there is no
+wrapper handle to navigate around. An unknown namespace maps to namespace
+`ErrNotFound` (404); a denied op maps to `auth.ErrUnauthorized` (403). The
+compiled policy is served from a per-namespace cache (default 60s, including a
+negative entry for missing namespaces) that collapses concurrent misses with
+singleflight and is invalidated immediately by the catalog's `OnChange` hook on
+admin `Put`/`Delete` within a process; across processes the TTL bounds
+staleness. `WithPolicyCacheTTL(0)` disables the cache. The raw `Scoped.Store()`
+(no guard) remains for trusted internal callers; the admin plane and tests use
+unguarded stores directly.
+
+The `echo` surface (`pkg/surface/echo`, mounted only for `--repo-type=echo`) is
+a diagnostic — not a package format — that drives this whole stack
+(credential extraction → OIDC verification → 401 challenge → namespace authz)
+for end-to-end testing, including a real GitHub Actions OIDC token in the
+`oidc-e2e` workflow.
 
 ## Observability (planned)
 
