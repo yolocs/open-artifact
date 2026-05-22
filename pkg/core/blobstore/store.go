@@ -38,7 +38,8 @@ type Store struct {
 	urlCache  *memoCache[string]
 	statCache *memoCache[*blob.Attributes]
 
-	guard Guard
+	guard   Guard
+	metrics Metrics
 }
 
 // Guard authorizes an operation against the Store's scope before it reaches the
@@ -142,7 +143,7 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	cfg := core.NewCreateConfig(opts...)
 	path := packageMetaPath(s.scope, name)
 	if !cfg.AllowOverwrite {
-		exists, err := s.bucket.Exists(ctx, path)
+		exists, err := s.bExists(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
 		}
@@ -163,6 +164,7 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 // Store-owned .meta/.tags/.cache objects) are dropped at every level — one
 // rule, every level.
 func (s *Store) listChildNames(ctx context.Context, prefix string) ([]string, error) {
+	start := time.Now()
 	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix, Delimiter: "/"})
 	var names []string
 	for {
@@ -171,6 +173,7 @@ func (s *Store) listChildNames(ctx context.Context, prefix string) ([]string, er
 			break
 		}
 		if err != nil {
+			s.observe(opList, start, err)
 			return nil, fmt.Errorf("blobstore: list %q: %w", prefix, mapErr(err))
 		}
 		name := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), "/")
@@ -179,6 +182,7 @@ func (s *Store) listChildNames(ctx context.Context, prefix string) ([]string, er
 		}
 		names = append(names, name)
 	}
+	s.observe(opList, start, nil)
 	sort.Strings(names)
 	return names, nil
 }
@@ -187,21 +191,25 @@ func (s *Store) listChildNames(ctx context.Context, prefix string) ([]string, er
 // descendant fallback in Package/Version Exists: a record with no .meta still
 // exists if anything was written beneath it.
 func (s *Store) hasDescendant(ctx context.Context, prefix string) (bool, error) {
+	start := time.Now()
 	iter := s.bucket.List(&blob.ListOptions{Prefix: prefix})
 	_, err := iter.Next(ctx)
 	if errors.Is(err, io.EOF) {
+		s.observe(opList, start, nil)
 		return false, nil
 	}
 	if err != nil {
+		s.observe(opList, start, err)
 		return false, fmt.Errorf("blobstore: list %q: %w", prefix, mapErr(err))
 	}
+	s.observe(opList, start, nil)
 	return true, nil
 }
 
 // readMeta reads and decodes a .meta envelope at path, mapping a missing
 // object to ErrNotFound.
 func (s *Store) readMeta(ctx context.Context, path string) (core.Meta, error) {
-	raw, err := s.bucket.ReadAll(ctx, path)
+	raw, err := s.bReadAll(ctx, path)
 	if err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: read meta %q: %w", path, mapErr(err))
 	}
@@ -250,7 +258,7 @@ func (p *pkg) Exists(ctx context.Context) (bool, error) {
 	if err := s.authorize(ctx, false); err != nil {
 		return false, err
 	}
-	ok, err := s.bucket.Exists(ctx, packageMetaPath(s.scope, p.name))
+	ok, err := s.bExists(ctx, packageMetaPath(s.scope, p.name))
 	if err != nil {
 		return false, fmt.Errorf("blobstore: probe %q: %w", packageMetaPath(s.scope, p.name), mapErr(err))
 	}
@@ -293,7 +301,7 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	cfg := core.NewCreateConfig(opts...)
 	path := versionMetaPath(s.scope, p.name, name)
 	if !cfg.AllowOverwrite {
-		exists, err := s.bucket.Exists(ctx, path)
+		exists, err := s.bExists(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
 		}
@@ -358,7 +366,7 @@ func (v *version) Exists(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	path := versionMetaPath(s.scope, v.pkg.name, v.name)
-	ok, err := s.bucket.Exists(ctx, path)
+	ok, err := s.bExists(ctx, path)
 	if err != nil {
 		return false, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
 	}
@@ -407,7 +415,7 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 	blobPath := filePath(s.scope, v.pkg.name, v.name, name)
 
 	if !cfg.AllowOverwrite {
-		exists, err := s.bucket.Exists(ctx, blobPath)
+		exists, err := s.bExists(ctx, blobPath)
 		if err != nil {
 			return nil, fmt.Errorf("blobstore: probe %q: %w", blobPath, mapErr(err))
 		}
@@ -416,7 +424,7 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 		}
 	}
 
-	w, err := s.bucket.NewWriter(ctx, blobPath, nil)
+	w, err := s.bNewWriter(ctx, blobPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: open writer %q: %w", blobPath, mapErr(err))
 	}
@@ -424,10 +432,10 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
 		// Abort the in-flight write so no partial blob is committed.
-		_ = w.Close()
+		_ = s.closeWriter(w)
 		return nil, fmt.Errorf("blobstore: stream %q: %w", blobPath, mapErr(err))
 	}
-	if err := w.Close(); err != nil {
+	if err := s.closeWriter(w); err != nil {
 		return nil, fmt.Errorf("blobstore: commit %q: %w", blobPath, mapErr(err))
 	}
 
@@ -471,7 +479,7 @@ func (f *file) Exists(ctx context.Context) (bool, error) {
 	if err := f.store().authorize(ctx, false); err != nil {
 		return false, err
 	}
-	exists, err := f.store().bucket.Exists(ctx, f.blobPath())
+	exists, err := f.store().bExists(ctx, f.blobPath())
 	if err != nil {
 		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobPath(), mapErr(err))
 	}
@@ -486,7 +494,7 @@ func (f *file) Meta(ctx context.Context) (core.Meta, error) {
 	if err := s.authorize(ctx, false); err != nil {
 		return core.Meta{}, err
 	}
-	raw, err := s.bucket.ReadAll(ctx, f.metaPath())
+	raw, err := s.bReadAll(ctx, f.metaPath())
 	if err == nil {
 		if m, derr := decodeMeta(raw); derr == nil {
 			return m, nil
@@ -509,7 +517,7 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 		return core.Meta{}, err
 	}
 
-	r, err := s.bucket.NewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobPath(), nil)
 	if err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
 	}
@@ -534,7 +542,7 @@ func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
-	r, err := s.bucket.NewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobPath(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
 	}
@@ -549,7 +557,7 @@ func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 // sidecarDigest returns the digest recorded in the file's sidecar, or "" when
 // the sidecar is absent or unreadable (digest verification is then skipped).
 func (f *file) sidecarDigest(ctx context.Context) string {
-	raw, err := f.store().bucket.ReadAll(ctx, f.metaPath())
+	raw, err := f.store().bReadAll(ctx, f.metaPath())
 	if err != nil {
 		return ""
 	}
@@ -570,13 +578,15 @@ func (f *file) DownloadURL(ctx context.Context) (string, error) {
 		return "", err
 	}
 	key := f.blobPath()
-	return s.urlCache.getOrCompute(key, func() (string, error) {
+	u, err := s.urlCache.getOrCompute(key, func() (string, error) {
 		// The SignedURL expiry equals the cache TTL, clamped by the backend's
 		// own per-cloud maximum, so a cached URL never outlives its validity.
+		start := time.Now()
 		u, err := s.sign(ctx, key, &blob.SignedURLOptions{
 			Expiry: s.urlTTL,
 			Method: http.MethodGet,
 		})
+		s.observe(opSignedURL, start, err)
 		if err != nil {
 			if gcerrors.Code(err) == gcerrors.Unimplemented {
 				return "", nil
@@ -585,6 +595,18 @@ func (f *file) DownloadURL(ctx context.Context) (string, error) {
 		}
 		return u, nil
 	})
+	// Record what the surface will do with this result: redirect to a signed
+	// URL, stream inline because signing is unsupported, or fall back to
+	// streaming because signing failed.
+	switch {
+	case err != nil:
+		s.redirect("error")
+	case u == "":
+		s.redirect("inline")
+	default:
+		s.redirect("redirected")
+	}
+	return u, err
 }
 
 // tag is the blobstore implementation of core.Tag.
@@ -614,7 +636,7 @@ func (t *tag) Exists(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	path := tagPath(s.scope, t.pkg.name, t.name)
-	ok, err := s.bucket.Exists(ctx, path)
+	ok, err := s.bExists(ctx, path)
 	if err != nil {
 		return false, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
 	}
@@ -627,7 +649,7 @@ func (s *Store) writeMeta(ctx context.Context, path string, m core.Meta) error {
 	if err != nil {
 		return fmt.Errorf("encode meta: %w", err)
 	}
-	if err := s.bucket.WriteAll(ctx, path, b, nil); err != nil {
+	if err := s.bWriteAll(ctx, path, b, nil); err != nil {
 		return fmt.Errorf("write %q: %w", path, mapErr(err))
 	}
 	return nil

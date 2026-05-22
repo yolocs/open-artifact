@@ -19,6 +19,8 @@ import (
 	"github.com/yolocs/open-artifact/internal/version"
 	"github.com/yolocs/open-artifact/pkg/bucket"
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/metrics"
+	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/serving"
 )
 
@@ -80,10 +82,19 @@ func serveRunE(run runFunc, dataPlane bool) func(*cobra.Command, []string) error
 	}
 }
 
-// serve is the shared server lifecycle: open the bucket, build the plane's
-// handler, then serve until the context is cancelled. build receives the open
-// bucket and returns the plane-specific handler; the logger is taken from ctx.
-func serve(ctx context.Context, cfg *runtimeConfig, component string, build func(*blob.Bucket) (http.Handler, error)) error {
+// planeHandler is the plane-specific inner handler plus a backend readiness
+// pinger, built from the open bucket and the shared metrics recorder.
+type planeHandler struct {
+	handler http.Handler
+	pinger  observability.Pinger
+}
+
+// serve is the shared server lifecycle: open the bucket, build the metrics
+// recorder, build the plane's handler, wrap it with observability, then serve
+// until the context is cancelled. build receives the open bucket and the
+// recorder (so backend calls are instrumented) and returns the plane handler
+// and its readiness pinger; the logger is taken from ctx.
+func serve(ctx context.Context, cfg *runtimeConfig, component string, build func(*blob.Bucket, metrics.Recorder) (planeHandler, error)) error {
 	logger := logging.FromContext(ctx)
 
 	bkt, cleanup, err := bucket.Open(ctx, cfg.BucketURL)
@@ -99,11 +110,33 @@ func serve(ctx context.Context, cfg *runtimeConfig, component string, build func
 		"metrics_enabled", cfg.EnableMetrics,
 	)
 
-	handler, err := build(bkt)
+	recorder, metricsHandler := buildRecorder(cfg)
+
+	plane, err := build(bkt, recorder)
 	if err != nil {
 		return err
 	}
 
+	handler := observability.Wrap(observability.Config{
+		Next:           plane.handler,
+		Recorder:       recorder,
+		MetricsHandler: metricsHandler,
+		MetricsPath:    cfg.MetricsPath,
+		Pinger:         plane.pinger,
+		Component:      component,
+	})
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	return serving.Run(ctx, addr, handler)
+}
+
+// buildRecorder returns the metrics recorder and the exposition handler. When
+// metrics are disabled it returns a no-op recorder and a nil handler, so the
+// metrics endpoint is absent and no series are collected.
+func buildRecorder(cfg *runtimeConfig) (metrics.Recorder, http.Handler) {
+	if !cfg.EnableMetrics {
+		return metrics.NoOp(), nil
+	}
+	prom := metrics.NewPrometheus(nil)
+	return prom, prom.Handler()
 }

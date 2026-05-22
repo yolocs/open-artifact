@@ -8,11 +8,11 @@ for how to run and configure the binary see
 [`operations.md`](operations.md); the roadmap lives in GitHub issues.
 
 This describes the target architecture. The `core` substrate with its
-`blobstore` implementation and the runtime foundation (CLI, bucket opener,
-logging, server lifecycle) exist today; namespaces, auth, observability, proxy
-primitives, and the format surfaces are described here as the design they are
-being built toward. Where it matters, sections note what is implemented versus
-planned.
+`blobstore` implementation, the runtime foundation (CLI, bucket opener,
+logging, server lifecycle), namespaces, auth, and observability exist today;
+the proxy primitives and the format surfaces are described here as the design
+they are being built toward. Where it matters, sections note what is
+implemented versus planned.
 
 ## What this project is
 
@@ -116,7 +116,8 @@ pkg/
   auth/              ← Authenticator/Authorizer, middleware, sentinels
     oidc/            ← OIDC discovery + token verification
     chain/           ← multi-issuer authenticator chain
-  metrics/           ← Recorder interface, NoOp + Prometheus impls (planned)
+  metrics/           ← Recorder interface, NoOp + Prometheus impls
+  observability/     ← liveness/readiness/metrics wrapper, request metrics + logging, format/op labeling
   proxy/             ← upstream HTTP client, blob-backed cache, negative cache, filters (planned)
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     admin/           ← namespace CRUD HTTP API
@@ -332,15 +333,66 @@ a diagnostic — not a package format — that drives this whole stack
 for end-to-end testing, including a real GitHub Actions OIDC token in the
 `oidc-e2e` workflow.
 
-## Observability (planned)
+## Observability
 
-A wrapper intercepts `/healthz`, `/readyz`, and the metrics path before auth
-or format routing. Readiness probes the backend (data plane: bucket
-reachable; admin: namespaces listable) with a 2s timeout and a 1s success
-cache, and reports build identity. Metrics use the `open_artifact_` prefix
-via a `metrics.Recorder` (`NoOp()` / `NewPrometheus(reg)`); blob backend calls
-and redirect outcomes are instrumented without changing the `core.Store` API.
-Structured request logs carry stable fields and never log `Authorization`.
+`pkg/observability` wraps each plane's handler (`observability.Wrap`) and
+intercepts `GET`/`HEAD /healthz`, `GET`/`HEAD /readyz`, and the configured
+metrics path **before** auth or format routing, so probes and scrapes never
+require credentials. Everything else flows through a request middleware that
+records one HTTP metric and one structured log line per request.
+
+- **Liveness** (`/healthz`) returns `200`/`ok\n` (empty body for `HEAD`) with
+  no backend call.
+- **Readiness** (`/readyz`) runs a backend `Pinger` with a **2s timeout** and
+  caches a *successful* result for **1s** per handler instance (failed probes
+  are not cached) to avoid probe storms. The data plane's pinger proves the
+  bucket is reachable (a sentinel `Exists` under the deployment root); the
+  admin plane's proves the namespace catalog is listable
+  (`namespace.Store.Ping`). A nil pinger collapses readiness to liveness
+  (`200`). The body reports `status`, `backend`, and build identity
+  (`version`, `commit`, `os_arch` from `internal/version`); a failed probe
+  returns `503` with a generic, secret-free `error` and logs the real cause —
+  signed URLs and credentials never reach the response.
+- **Metrics** are served on `--metrics-path` (default `/metrics`) only when
+  `--enable-metrics` is set; otherwise the path returns `404` and the recorder
+  is `metrics.NoOp()`, so there are no nil checks and no runtime panics.
+
+Metrics use the `open_artifact_` prefix via a `metrics.Recorder`
+(`NoOp()` / `NewPrometheus(reg)`; a nil registry seeds Go/process collectors).
+The recorder is created once in the command layer and shared two ways: the
+observability middleware records `http_*` series (labels `format`, `op`,
+`status`), and the namespace `Registry` installs it on every scoped
+`core.Store` so blob backend calls (`blob_backend_*`, labels `op`, `status`)
+and download-redirect outcomes (`blob_redirect_total`, label `outcome`:
+`redirected`/`inline`/`error`) are instrumented.
+
+The HTTP `format`/`op` labels come from a mutable request state on the context.
+A nested router labels its format with `observability.WrapWithFormat(format,
+…)` and a route names its operation with `observability.SetOperation(r, op)`;
+unset labels fall back to `unknown` (format) and a method map (GET/HEAD→`read`,
+PUT/POST/PATCH→`write`, DELETE→`delete`, else lowercased method). A response
+wrapper records the status (defaulting to `200` when a handler writes a body
+without `WriteHeader`) and response bytes; request bytes come from
+`Content-Length` (0 for unknown/chunked — the body is never read).
+
+**Blob instrumentation respects core's purity.** `pkg/core`/`blobstore` must
+not import `pkg/metrics`, so `blobstore` defines a small, metrics-agnostic
+`Metrics` hook (the same shape as `Guard`) installed via
+`blobstore.WithMetrics`; a `metrics.Recorder` satisfies it structurally. The
+Store wraps each bucket primitive (`exists`, `read_all`, `write_all`,
+`new_reader`, `new_writer`, `writer_close`, `list`, `attributes`,
+`signed_url`) with timing + a status classified from the gocloud error code
+(`ok`/`not_found`/`already_exists`/`unsupported`/`error`), preserving the
+existing error wrapping and sentinel mapping. `File.DownloadURL` emits
+`BlobRedirect("redirected")` for a signed URL, `"inline"` when signing is
+unsupported (empty URL), and `"error"` when signing fails and the caller falls
+back to streaming.
+
+Structured request logs (via `pkg/logging`) carry `method`, `path`, `status`,
+`duration_ms`, `bytes_in`, `bytes_out`, `format`, `op`, optional `namespace`
+and `request_id` (`X-Request-Id`), and an `error` only when one is explicitly
+recorded with `observability.RecordError`. The query string is omitted and the
+`Authorization` header is never logged.
 
 ## Proxy primitives (planned)
 

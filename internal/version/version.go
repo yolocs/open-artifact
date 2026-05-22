@@ -47,3 +47,19 @@ func String() string {
 	return fmt.Sprintf("open-artifact %s (commit %s, %s/%s)",
 		Version, commit(), runtime.GOOS, runtime.GOARCH)
 }
+
+// Build is the structured build identity surfaced by the readiness endpoint.
+type Build struct {
+	Version string
+	Commit  string
+	OSArch  string
+}
+
+// Get returns the resolved build identity.
+func Get() Build {
+	return Build{
+		Version: Version,
+		Commit:  commit(),
+		OSArch:  runtime.GOOS + "/" + runtime.GOARCH,
+	}
+}

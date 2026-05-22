@@ -22,6 +22,11 @@ const (
 	defaultAdminPort = 8081
 )
 
+// reservedObservabilityPaths are the fixed liveness/readiness endpoints the
+// observability wrapper registers; --metrics-path may not reuse one or the
+// shared mux would panic on a duplicate pattern at startup.
+var reservedObservabilityPaths = map[string]bool{"/healthz": true, "/readyz": true}
+
 // repoTypes is the eventual allow-list of data-plane formats. Real serving is
 // out of scope here (#19-#25); this issue only validates the flag value. The
 // internal "echo" type is reserved for OIDC CI wiring (#25).
@@ -149,6 +154,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 	}
 	if !strings.HasPrefix(c.MetricsPath, "/") {
 		errs = append(errs, fmt.Errorf("invalid --metrics-path %q: must start with /", c.MetricsPath))
+	}
+	if reservedObservabilityPaths[c.MetricsPath] {
+		errs = append(errs, fmt.Errorf("invalid --metrics-path %q: collides with a reserved observability endpoint", c.MetricsPath))
 	}
 
 	if dataPlane {
