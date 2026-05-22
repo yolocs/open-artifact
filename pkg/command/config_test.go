@@ -66,6 +66,8 @@ func TestValidate(t *testing.T) {
 		{name: "bad log level", mutate: func(c *runtimeConfig) { c.LogLevel = "loud" }, wantErr: true},
 		{name: "bad log format", mutate: func(c *runtimeConfig) { c.LogFormat = "xml" }, wantErr: true},
 		{name: "bad metrics path", mutate: func(c *runtimeConfig) { c.MetricsPath = "metrics" }, wantErr: true},
+		{name: "metrics path collides with healthz", mutate: func(c *runtimeConfig) { c.MetricsPath = "/healthz" }, wantErr: true},
+		{name: "metrics path collides with readyz", mutate: func(c *runtimeConfig) { c.MetricsPath = "/readyz" }, wantErr: true},
 		{name: "port too low", mutate: func(c *runtimeConfig) { c.Port = 0 }, wantErr: true},
 		{name: "port too high", mutate: func(c *runtimeConfig) { c.Port = 70000 }, wantErr: true},
 		{
