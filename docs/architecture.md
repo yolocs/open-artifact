@@ -9,10 +9,11 @@ for how to run and configure the binary see
 
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
-logging, server lifecycle), namespaces, auth, and observability exist today;
-the proxy primitives and the format surfaces are described here as the design
-they are being built toward. Where it matters, sections note what is
-implemented versus planned.
+logging, server lifecycle), namespaces, auth, observability, and the shared
+proxy primitives exist today; the format surfaces that wire those primitives
+into PyPI/npm/Maven proxy mode are described here as the design they are being
+built toward. Where it matters, sections note what is implemented versus
+planned.
 
 ## What this project is
 
@@ -118,7 +119,12 @@ pkg/
     chain/           ← multi-issuer authenticator chain
   metrics/           ← Recorder interface, NoOp + Prometheus impls
   observability/     ← liveness/readiness/metrics wrapper, request metrics + logging, format/op labeling
-  proxy/             ← upstream HTTP client, blob-backed cache, negative cache, filters (planned)
+  proxy/             ← shared pull-through primitives (format-agnostic)
+    httpclient/      ← context-aware upstream GET/HEAD with body caps + status mapping
+    cache/           ← blob-backed metadata+body cache under <ns>/<fmt>/.cache/
+    negcache/        ← in-memory negative cache for upstream 404s
+    singleflight/    ← typed cold-fill coalescer
+    filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     admin/           ← namespace CRUD HTTP API
     pypi/            ← PEP 503/691 hosted + proxy (planned)
@@ -394,13 +400,49 @@ and `request_id` (`X-Request-Id`), and an `error` only when one is explicitly
 recorded with `observability.RecordError`. The query string is omitted and the
 `Authorization` header is never logged.
 
-## Proxy primitives (planned)
+## Proxy primitives
 
-Shared, format-agnostic pull-through machinery: a context-aware upstream HTTP
-client with body caps, a blob-backed mutable metadata+body cache under the
-format-level `<ns>/<fmt>/.cache/`, an in-memory negative cache for upstream
-404s, process-local singleflight for cold fills, and an ordered
-allow/deny/delay filter chain validated as part of namespace spec validation.
+Shared, format-agnostic pull-through machinery lives under `pkg/proxy`, built so
+proxy-mode format surfaces can compose it without depending on each other:
+
+- **`pkg/proxy/httpclient`** — a context-aware upstream client with context-aware
+  `Get`/`Head`, a configurable buffered-body cap (oversized bodies fail with
+  `ErrOversized` before unbounded buffering), and status-mapping helpers
+  (`IsOK`/`IsNotFound`/`IsServerError`) so a clean upstream 404 is distinguishable
+  from an unavailable or malformed upstream. An HTTP status is never an error;
+  errors are reserved for transport failure, cancellation, oversize, or read
+  failure. The underlying `*http.Client` is injectable for tests. It carries no
+  package-format behavior.
+- **`pkg/proxy/cache`** — a blob-backed mutable metadata+body cache under the
+  format-level `<ns>/<fmt>/.cache/`, keyed by `sha256(logical-key)` with a
+  `<hash>.body` blob and a `<hash>.json` `EntryMeta` envelope (the logical key is
+  stored in the envelope for debugging/collision detection). `Get` returns only
+  fresh entries; `GetStale` serves an expired entry flagged stale for
+  upstream-outage fallback; `Put`/`Delete` round out the surface. Freshness:
+  zero `ExpiresAt` is fresh forever, otherwise fresh until `ExpiresAt`. The body
+  digest is recomputed and verified on read (`core.ErrDigestMismatch` on
+  tampering). Everything here is opaque to `core.Store` because `.cache/` is a
+  dot-entry dropped at every listing level.
+- **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
+  repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
+  short default TTL (~30s). It is reconstructible and never persisted to the
+  bucket.
+- **`pkg/proxy/singleflight`** — a typed wrapper over
+  `golang.org/x/sync/singleflight` that collapses concurrent cold misses for one
+  key into a single fill per process. Different replicas may each fetch; that is
+  acceptable for a pull-through cache.
+- **`pkg/proxy/filter`** — the ordered allow/deny/delay filter chain: the
+  persisted config schema (`Spec`/`Rule`), its validation, and the decision
+  engine (`Ref` → `Decision`). The schema lives here as the single source of
+  truth; `pkg/namespace` embeds `filter.Spec` in its proxy block and validates
+  the chain through `filter.Validate` during spec validation (so `namespace`
+  depends on this pure, stdlib-only leaf, not the reverse). Kinds: `allow`/`deny`
+  match `path.Match` globs (so `*` does not cross `/`, which matters for npm
+  scoped names) and/or package/version rules — first decision wins, abstain
+  moves on, all-abstain defaults to allow; `delay` quarantines artifacts younger
+  than `min_age` and asks for metadata when the publish time is unknown. Filters
+  apply only to artifact/file downloads, never to index/metadata listings.
+
 Cold-miss bytes flow through open-artifact (never redirect clients to public
 upstream URLs); cache hits may still use backend signed-URL redirects because
 those target the operator-controlled bucket. Reader policy is sufficient to

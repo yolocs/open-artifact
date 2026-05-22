@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
+	"github.com/yolocs/open-artifact/pkg/proxy/filter"
 )
 
 func TestValidateName(t *testing.T) {
@@ -107,7 +109,17 @@ func TestNormalizeForWrite(t *testing.T) {
 		},
 		{
 			name:    "hosted with filters rejected",
-			in:      Spec{Proxy: Proxy{Filters: []FilterSpec{{Action: "allow"}}}},
+			in:      Spec{Proxy: Proxy{Filters: []filter.Spec{{Kind: filter.KindAllow, Patterns: []string{"*"}}}}},
+			wantErr: ErrInvalidProxy,
+		},
+		{
+			name: "proxy with valid filters",
+			in:   Spec{Mode: ModeProxy, Proxy: Proxy{Upstream: "https://example.com", Filters: []filter.Spec{{Kind: filter.KindAllow, Patterns: []string{"@myorg/*"}}, {Kind: filter.KindDelay, MinAge: "24h"}}}},
+			want: Spec{SchemaVersion: 1, Mode: ModeProxy, Proxy: Proxy{Upstream: "https://example.com", Filters: []filter.Spec{{Kind: filter.KindAllow, Patterns: []string{"@myorg/*"}}, {Kind: filter.KindDelay, MinAge: "24h"}}}},
+		},
+		{
+			name:    "proxy with invalid filter rejected",
+			in:      Spec{Mode: ModeProxy, Proxy: Proxy{Upstream: "https://example.com", Filters: []filter.Spec{{Kind: "mirror"}}}},
 			wantErr: ErrInvalidProxy,
 		},
 		{

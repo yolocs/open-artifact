@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+
+	"github.com/yolocs/open-artifact/pkg/proxy/filter"
 )
 
 // Sentinel errors. Surfaces and the admin handler match them with errors.Is
@@ -16,8 +18,8 @@ var (
 	// newer than this binary understands.
 	ErrUnsupportedSchemaVersion = errors.New("namespace: unsupported schema version")
 	// ErrInvalidProxy is returned when a spec's mode/proxy combination is
-	// invalid (unknown mode, missing/invalid upstream, or a proxy block on a
-	// hosted namespace).
+	// invalid (unknown mode, missing/invalid upstream, a proxy block on a
+	// hosted namespace, or an invalid filter chain).
 	ErrInvalidProxy = errors.New("namespace: invalid proxy")
 	// ErrInvalidPolicy is returned when a spec's policy carries a malformed
 	// subject matcher (empty matcher, unknown/reserved kind, empty claim key,
@@ -93,6 +95,9 @@ func normalizeForWrite(spec Spec) (Spec, error) {
 	case ModeProxy:
 		if err := validateUpstream(spec.Proxy.Upstream); err != nil {
 			return Spec{}, err
+		}
+		if err := filter.Validate(spec.Proxy.Filters); err != nil {
+			return Spec{}, fmt.Errorf("%w: %v", ErrInvalidProxy, err)
 		}
 	default:
 		return Spec{}, fmt.Errorf("%w: unknown mode %q", ErrInvalidProxy, spec.Mode)

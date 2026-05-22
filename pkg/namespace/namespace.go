@@ -10,6 +10,8 @@
 // .meta is written, and emptiness is "no package data under <ns>/".
 package namespace
 
+import "github.com/yolocs/open-artifact/pkg/proxy/filter"
+
 // CurrentSchemaVersion is the namespace spec schema version this binary
 // understands. A stored spec with a higher version is rejected.
 const CurrentSchemaVersion = 1
@@ -37,19 +39,13 @@ type Spec struct {
 	Format        map[string]any `json:"format,omitempty"`
 }
 
-// Proxy configures a proxy-mode namespace's upstream and filter chain. Filter
-// validation details are owned by the proxy work (#17).
+// Proxy configures a proxy-mode namespace's upstream and ordered
+// allow/deny/delay filter chain. The filter schema, validation, and decision
+// semantics live in pkg/proxy/filter; the chain is validated as part of spec
+// validation and applies only to artifact downloads.
 type Proxy struct {
-	Upstream string       `json:"upstream,omitempty"`
-	Filters  []FilterSpec `json:"filters,omitempty"`
-}
-
-// FilterSpec is one entry in a proxy namespace's ordered allow/deny/delay
-// filter chain. Its validation semantics are defined by #17; here it only
-// needs to round-trip.
-type FilterSpec struct {
-	Action  string `json:"action,omitempty"`
-	Pattern string `json:"pattern,omitempty"`
+	Upstream string        `json:"upstream,omitempty"`
+	Filters  []filter.Spec `json:"filters,omitempty"`
 }
 
 // Subject-matcher kinds. The empty kind is equivalent to KindOIDC. KindBasicToken
