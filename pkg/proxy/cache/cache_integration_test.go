@@ -60,17 +60,14 @@ func TestPersistsAcrossInstances(t *testing.T) {
 
 	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
 		ctx := t.Context()
-		const ns, format, key = "team-a", "npm", "npm:packument:@scope/name"
+		const ns, format, key = "team-a", "npm", "packument:@scope/name"
 		body := []byte(`{"name":"@scope/name"}`)
 
 		writer, err := New(b, "")
 		if err != nil {
 			t.Fatalf("New() = %v", err)
 		}
-		if err := writer.Put(ctx, ns, format, key, Entry{
-			Meta: EntryMeta{ContentType: "application/json", Status: 200},
-			Body: body,
-		}); err != nil {
+		if err := writer.Put(ctx, ns, format, key, body); err != nil {
 			t.Fatalf("Put() = %v", err)
 		}
 
@@ -84,9 +81,6 @@ func TestPersistsAcrossInstances(t *testing.T) {
 		}
 		if string(got.Body) != string(body) {
 			t.Fatalf("body = %q, want %q", got.Body, body)
-		}
-		if got.Meta.Key != key {
-			t.Fatalf("meta.Key = %q, want %q", got.Meta.Key, key)
 		}
 	})
 }
@@ -105,7 +99,7 @@ func TestInvisibleToStoreListings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cache New() = %v", err)
 		}
-		if err := c.Put(ctx, ns, format, "pypi:simple:requests", Entry{Body: []byte("cached")}); err != nil {
+		if err := c.Put(ctx, ns, format, "simple:requests", []byte("cached")); err != nil {
 			t.Fatalf("Put() = %v", err)
 		}
 

@@ -121,7 +121,7 @@ pkg/
   observability/     ← liveness/readiness/metrics wrapper, request metrics + logging, format/op labeling
   proxy/             ← shared pull-through primitives (format-agnostic)
     httpclient/      ← context-aware upstream GET/HEAD with body caps + status mapping
-    cache/           ← blob-backed metadata+body cache under <ns>/<fmt>/.cache/
+    cache/           ← thin keyed blob store for upstream index/metadata under <ns>/<fmt>/.cache/
     negcache/        ← in-memory negative cache for upstream 404s
     singleflight/    ← typed cold-fill coalescer
     filter/          ← allow/deny/delay config schema, validation, and decision engine
@@ -413,16 +413,13 @@ proxy-mode format surfaces can compose it without depending on each other:
   errors are reserved for transport failure, cancellation, oversize, or read
   failure. The underlying `*http.Client` is injectable for tests. It carries no
   package-format behavior.
-- **`pkg/proxy/cache`** — a blob-backed mutable metadata+body cache under the
-  format-level `<ns>/<fmt>/.cache/`, keyed by `sha256(logical-key)` with a
-  `<hash>.body` blob and a `<hash>.json` `EntryMeta` envelope (the logical key is
-  stored in the envelope for debugging/collision detection). `Get` returns only
-  fresh entries; `GetStale` serves an expired entry flagged stale for
-  upstream-outage fallback; `Put`/`Delete` round out the surface. Freshness:
-  zero `ExpiresAt` is fresh forever, otherwise fresh until `ExpiresAt`. The body
-  digest is recomputed and verified on read (`core.ErrDigestMismatch` on
-  tampering). Everything here is opaque to `core.Store` because `.cache/` is a
-  dot-entry dropped at every listing level.
+- **`pkg/proxy/cache`** — a thin keyed blob store under the format-level
+  `<ns>/<fmt>/.cache/`, keyed by `sha256(logical-key)`, with `Get`/`Put`/`Delete`
+  over opaque bytes. It caches only **derived index/metadata** (a PyPI simple
+  page, an npm packument) — never artifact bytes. `Get` returns the blob plus its
+  `ModTime`; the surface owns the freshness/TTL policy and decides what to cache
+  and under what key. Everything here is opaque to `core.Store` because `.cache/`
+  is a dot-entry dropped at every listing level.
 - **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
   repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
   short default TTL (~30s). It is reconstructible and never persisted to the
@@ -443,10 +440,14 @@ proxy-mode format surfaces can compose it without depending on each other:
   than `min_age` and asks for metadata when the publish time is unknown. Filters
   apply only to artifact/file downloads, never to index/metadata listings.
 
-Cold-miss bytes flow through open-artifact (never redirect clients to public
-upstream URLs); cache hits may still use backend signed-URL redirects because
-those target the operator-controlled bucket. Reader policy is sufficient to
-populate cache.
+On a cold miss the surface fetches from upstream and **writes artifact files
+into the namespace's `core.Store` as real Packages/Versions/Files**, so they are
+served from our bucket thereafter exactly like hosted content; only derived
+index/metadata lands in `.cache/`. Cold-miss bytes flow through open-artifact
+(never redirect clients to public upstream URLs); a Store-hosted artifact may
+still use backend signed-URL redirects because those target the
+operator-controlled bucket. Reader policy is sufficient to populate both the
+Store and the cache.
 
 ## gocloud.dev/blob notes
 
