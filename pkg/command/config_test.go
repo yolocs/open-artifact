@@ -42,12 +42,14 @@ func TestValidate(t *testing.T) {
 
 	base := func() *runtimeConfig {
 		return &runtimeConfig{
-			Port:        8080,
-			BucketURL:   "mem://",
-			MetricsPath: "/metrics",
-			LogLevel:    "info",
-			LogFormat:   "text",
-			AuthnKind:   "oidc",
+			Port:              8080,
+			BucketURL:         "mem://",
+			MetricsPath:       "/metrics",
+			LogLevel:          "info",
+			LogFormat:         "text",
+			AuthnKind:         "oidc",
+			AuthnOIDCIssuers:  []string{"https://idp.example"},
+			AuthnOIDCAudience: "open-artifact",
 		}
 	}
 
@@ -87,6 +89,46 @@ func TestValidate(t *testing.T) {
 			dataPlane: true,
 			mutate:    func(c *runtimeConfig) { c.AuthnKind = "mtls" },
 			wantErr:   true,
+		},
+		{
+			name:      "disable authn is valid without oidc config",
+			dataPlane: true,
+			mutate: func(c *runtimeConfig) {
+				c.DisableAuthn = true
+				c.AuthnKind = ""
+				c.AuthnOIDCIssuers = nil
+				c.AuthnOIDCAudience = ""
+			},
+		},
+		{
+			name:      "oidc missing issuers",
+			dataPlane: true,
+			mutate:    func(c *runtimeConfig) { c.AuthnOIDCIssuers = nil },
+			wantErr:   true,
+		},
+		{
+			name:      "oidc missing audience",
+			dataPlane: true,
+			mutate:    func(c *runtimeConfig) { c.AuthnOIDCAudience = "" },
+			wantErr:   true,
+		},
+		{
+			name:      "disable authn and explicit authn kind are mutually exclusive",
+			dataPlane: true,
+			mutate: func(c *runtimeConfig) {
+				c.DisableAuthn = true
+				c.authnKindSet = true
+			},
+			wantErr: true,
+		},
+		{
+			name:      "authn not enforced on admin plane",
+			dataPlane: false,
+			mutate: func(c *runtimeConfig) {
+				c.AuthnKind = ""
+				c.AuthnOIDCIssuers = nil
+				c.AuthnOIDCAudience = ""
+			},
 		},
 	}
 	for _, tc := range tests {

@@ -37,7 +37,22 @@ type Store struct {
 
 	urlCache  *memoCache[string]
 	statCache *memoCache[*blob.Attributes]
+
+	guard Guard
 }
+
+// Guard authorizes an operation against the Store's scope before it reaches the
+// bucket. write distinguishes a mutation from a read. It returns nil to allow
+// and a non-nil error to deny; the Store surfaces that error unchanged. A nil
+// Guard disables the check, so a Store constructed without one is a plain,
+// trusted storage handle (used by the admin plane and tests).
+//
+// The hook is deliberately auth-agnostic: blobstore knows nothing about OIDC,
+// namespaces, or policy. The namespace layer supplies a Guard that closes over
+// a compiled policy and the request's subject, keeping pkg/core free of those
+// concerns while making authorization impossible to bypass at the storage
+// boundary.
+type Guard func(ctx context.Context, write bool) error
 
 // Option customizes a Store at construction.
 type Option func(*Store)
@@ -45,6 +60,12 @@ type Option func(*Store)
 // withClock overrides the Store's time source (used by tests).
 func withClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// WithGuard installs an authorization Guard. Every read/write the Store
+// performs is authorized through g before any bucket access.
+func WithGuard(g Guard) Option {
+	return func(s *Store) { s.guard = g }
 }
 
 // NewWithBucket constructs a Store over b, bound to scope (a path prefix such
@@ -81,6 +102,15 @@ func NewWithBucket(b *blob.Bucket, scope string, opts ...Option) (*Store, error)
 // Namespace returns the scope this Store is bound to.
 func (s *Store) Namespace() string { return s.scope }
 
+// authorize runs the Guard for an operation, if one is installed. write reports
+// whether the operation mutates storage.
+func (s *Store) authorize(ctx context.Context, write bool) error {
+	if s.guard == nil {
+		return nil
+	}
+	return s.guard(ctx, write)
+}
+
 // Package returns a handle to the named Package without performing any I/O.
 func (s *Store) Package(name string) core.Package {
 	return &pkg{store: s, name: name}
@@ -89,6 +119,9 @@ func (s *Store) Package(name string) core.Package {
 // Packages lists every Package present in the Store's namespace. An empty
 // namespace yields an empty slice, not an error.
 func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	names, err := s.listChildNames(ctx, scopePrefix(s.scope))
 	if err != nil {
 		return nil, err
@@ -103,6 +136,9 @@ func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
 // AddPackage creates a Package's .meta envelope. With AllowOverwrite=false
 // (the default) a pre-existing .meta yields ErrAlreadyExists.
 func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.CreateOption) (core.Package, error) {
+	if err := s.authorize(ctx, true); err != nil {
+		return nil, err
+	}
 	cfg := core.NewCreateConfig(opts...)
 	path := packageMetaPath(s.scope, name)
 	if !cfg.AllowOverwrite {
@@ -203,11 +239,17 @@ func (p *pkg) Namespace() string { return p.store.scope }
 func (p *pkg) Store() core.Store { return p.store }
 
 func (p *pkg) Meta(ctx context.Context) (core.Meta, error) {
+	if err := p.store.authorize(ctx, false); err != nil {
+		return core.Meta{}, err
+	}
 	return p.store.readMeta(ctx, packageMetaPath(p.store.scope, p.name))
 }
 
 func (p *pkg) Exists(ctx context.Context) (bool, error) {
 	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return false, err
+	}
 	ok, err := s.bucket.Exists(ctx, packageMetaPath(s.scope, p.name))
 	if err != nil {
 		return false, fmt.Errorf("blobstore: probe %q: %w", packageMetaPath(s.scope, p.name), mapErr(err))
@@ -219,6 +261,9 @@ func (p *pkg) Exists(ctx context.Context) (bool, error) {
 }
 
 func (p *pkg) Annotate(ctx context.Context, annotations map[string]any) error {
+	if err := p.store.authorize(ctx, true); err != nil {
+		return err
+	}
 	return p.store.upsertAnnotations(ctx, packageMetaPath(p.store.scope, p.name), annotations)
 }
 
@@ -226,6 +271,9 @@ func (p *pkg) Version(name string) core.Version { return &version{pkg: p, name: 
 
 func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
 	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	names, err := s.listChildNames(ctx, packagePrefix(s.scope, p.name))
 	if err != nil {
 		return nil, err
@@ -238,8 +286,11 @@ func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
 }
 
 func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOption) (core.Version, error) {
-	cfg := core.NewCreateConfig(opts...)
 	s := p.store
+	if err := s.authorize(ctx, true); err != nil {
+		return nil, err
+	}
+	cfg := core.NewCreateConfig(opts...)
 	path := versionMetaPath(s.scope, p.name, name)
 	if !cfg.AllowOverwrite {
 		exists, err := s.bucket.Exists(ctx, path)
@@ -262,6 +313,9 @@ func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
 
 func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	names, err := s.listChildNames(ctx, packageTagsPrefix(s.scope, p.name))
 	if err != nil {
 		return nil, err
@@ -274,6 +328,9 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 }
 
 func (p *pkg) SetTag(ctx context.Context, name, target string) error {
+	if err := p.store.authorize(ctx, true); err != nil {
+		return err
+	}
 	return p.store.writeTagTarget(ctx, p.name, name, target)
 }
 
@@ -289,11 +346,17 @@ func (v *version) Package() core.Package { return v.pkg }
 
 func (v *version) Meta(ctx context.Context) (core.Meta, error) {
 	s := v.pkg.store
+	if err := s.authorize(ctx, false); err != nil {
+		return core.Meta{}, err
+	}
 	return s.readMeta(ctx, versionMetaPath(s.scope, v.pkg.name, v.name))
 }
 
 func (v *version) Exists(ctx context.Context) (bool, error) {
 	s := v.pkg.store
+	if err := s.authorize(ctx, false); err != nil {
+		return false, err
+	}
 	path := versionMetaPath(s.scope, v.pkg.name, v.name)
 	ok, err := s.bucket.Exists(ctx, path)
 	if err != nil {
@@ -307,6 +370,9 @@ func (v *version) Exists(ctx context.Context) (bool, error) {
 
 func (v *version) Annotate(ctx context.Context, annotations map[string]any) error {
 	s := v.pkg.store
+	if err := s.authorize(ctx, true); err != nil {
+		return err
+	}
 	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
 }
 
@@ -314,6 +380,9 @@ func (v *version) File(name string) core.File { return &file{version: v, name: n
 
 func (v *version) Files(ctx context.Context) ([]core.File, error) {
 	s := v.pkg.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	names, err := s.listChildNames(ctx, versionPrefix(s.scope, v.pkg.name, v.name))
 	if err != nil {
 		return nil, err
@@ -330,8 +399,11 @@ func (v *version) Files(ctx context.Context) ([]core.File, error) {
 // and timestamps. With AllowOverwrite=false (the default) a pre-existing blob
 // causes ErrAlreadyExists.
 func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.File, error) {
-	cfg := core.NewCreateConfig(opts...)
 	s := v.pkg.store
+	if err := s.authorize(ctx, true); err != nil {
+		return nil, err
+	}
+	cfg := core.NewCreateConfig(opts...)
 	blobPath := filePath(s.scope, v.pkg.name, v.name, name)
 
 	if !cfg.AllowOverwrite {
@@ -396,6 +468,9 @@ func (f *file) metaPath() string {
 }
 
 func (f *file) Exists(ctx context.Context) (bool, error) {
+	if err := f.store().authorize(ctx, false); err != nil {
+		return false, err
+	}
 	exists, err := f.store().bucket.Exists(ctx, f.blobPath())
 	if err != nil {
 		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobPath(), mapErr(err))
@@ -408,6 +483,9 @@ func (f *file) Exists(ctx context.Context) (bool, error) {
 // blob and derives timestamps from the bucket attributes.
 func (f *file) Meta(ctx context.Context) (core.Meta, error) {
 	s := f.store()
+	if err := s.authorize(ctx, false); err != nil {
+		return core.Meta{}, err
+	}
 	raw, err := s.bucket.ReadAll(ctx, f.metaPath())
 	if err == nil {
 		if m, derr := decodeMeta(raw); derr == nil {
@@ -453,6 +531,9 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 // surfaces ErrDigestMismatch at EOF.
 func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 	s := f.store()
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	r, err := s.bucket.NewReader(ctx, f.blobPath(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
@@ -485,6 +566,9 @@ func (f *file) sidecarDigest(ctx context.Context) string {
 // the surface falls back to streaming Read without re-probing.
 func (f *file) DownloadURL(ctx context.Context) (string, error) {
 	s := f.store()
+	if err := s.authorize(ctx, false); err != nil {
+		return "", err
+	}
 	key := f.blobPath()
 	return s.urlCache.getOrCompute(key, func() (string, error) {
 		// The SignedURL expiry equals the cache TTL, clamped by the backend's
@@ -514,6 +598,9 @@ func (t *tag) Namespace() string     { return t.pkg.store.scope }
 func (t *tag) Package() core.Package { return t.pkg }
 
 func (t *tag) Ref(ctx context.Context) (core.Version, error) {
+	if err := t.pkg.store.authorize(ctx, false); err != nil {
+		return nil, err
+	}
 	target, err := t.pkg.store.readTagTarget(ctx, t.pkg.name, t.name)
 	if err != nil {
 		return nil, err
@@ -523,6 +610,9 @@ func (t *tag) Ref(ctx context.Context) (core.Version, error) {
 
 func (t *tag) Exists(ctx context.Context) (bool, error) {
 	s := t.pkg.store
+	if err := s.authorize(ctx, false); err != nil {
+		return false, err
+	}
 	path := tagPath(s.scope, t.pkg.name, t.name)
 	ok, err := s.bucket.Exists(ctx, path)
 	if err != nil {

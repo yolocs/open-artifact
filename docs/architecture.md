@@ -113,9 +113,9 @@ pkg/
     blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
   logging/           ← slog setup, context helpers, stable fields
   namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory
-  auth/              ← Authenticator/Authorizer, middleware, sentinels (planned)
-    oidc/            ← OIDC discovery + token verification (planned)
-    chain/           ← multi-issuer authenticator chain (planned)
+  auth/              ← Authenticator/Authorizer, middleware, sentinels
+    oidc/            ← OIDC discovery + token verification
+    chain/           ← multi-issuer authenticator chain
   metrics/           ← Recorder interface, NoOp + Prometheus impls (planned)
   proxy/             ← upstream HTTP client, blob-backed cache, negative cache, filters (planned)
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
@@ -270,16 +270,67 @@ attributes.
   (default 60s, singleflight, negative caching) is invalidated immediately on
   admin `Put`/`Delete`.
 
-## Auth (planned)
+## Auth
 
-OIDC only in v1. Credentials arrive as `Authorization: Bearer <token>` or
-`Authorization: Basic base64("<sentinel-user>:<token>")` (sentinel users:
-`_oidc`, `oauth2accesstoken`, `_token`). Middleware returns 401 with both
-`Bearer` and `Basic` `WWW-Authenticate` challenges on missing/invalid
-credentials, and never wraps `/healthz`, `/readyz`, or `/metrics`. A
-multi-issuer chain tries authenticators in order: `ErrNoCredential` falls
+OIDC only in v1 (`pkg/auth`). Credentials arrive as `Authorization: Bearer
+<token>` or `Authorization: Basic base64("<sentinel-user>:<token>")` (sentinel
+users: `_oidc`, `oauth2accesstoken`, `_token`); a Basic header with any other
+username is not a password login and yields `ErrNoCredential`. An
+`Authenticator` turns a request into an `AuthContext` (`Issuer`, `ID`, `Email`,
+`Claims`, `Kind`); the sentinel errors `ErrNoCredential`, `ErrInvalidToken`,
+`ErrUnauthorized`, and `ErrUnknownOp` are all `errors.Is`-matchable.
+
+`auth.Middleware` returns 401 with both `Bearer` and `Basic`
+`WWW-Authenticate` challenges on missing/invalid credentials, and never wraps
+`/healthz`, `/readyz`, or `/metrics` (#25 installs it only inside format
+routes). The OIDC authenticator (`pkg/auth/oidc`) does lazy discovery + JWKS
+(both size-capped), peeks the unverified `iss` before any network work so a
+token for another issuer falls through as `ErrNoCredential`, verifies audience
+exactly, accepts only the issuer's advertised signing algorithms (never
+`none`), and reads `email` only when `email_verified` is true. A multi-issuer
+chain (`pkg/auth/chain`) tries authenticators in order: `ErrNoCredential` falls
 through, the first success wins, the first hard error stops. `--disable-authn`
-swaps in an always-anonymous authenticator and logs a warning.
+swaps in `AlwaysAnonymous` (issuer/id/kind = `anonymous`) and logs a warning;
+otherwise the data plane refuses to start without OIDC issuers and an audience.
+
+### Per-namespace authorization
+
+A namespace `Policy` lists `readers` and `writers` as `SubjectMatcher`s
+(`issuer`, `sub_match`, `email`, `claims_match`, `kind`). Matching: `issuer`
+and `email` compare for equality; `sub_match` and every `claims_match` value
+are RE2 regexes anchored at both ends (non-string claims are JSON-encoded with
+stable key order first); an empty `kind` means `oidc` (`basictoken` is reserved
+and rejected, unknown kinds rejected). Within a matcher all populated fields
+are ANDed; across the selected list any matcher allows. Readers and writers are
+independent (write does not imply read), an empty policy is deny-all, a nil
+`AuthContext` is unauthorized, and an unknown op is `ErrUnknownOp`. Policy
+validation happens at admin write time and maps to 400.
+
+Enforcement lives **below** the surface protocol code and **inside** the
+storage handle rather than in a decorator: `blobstore.Store` exposes a generic,
+auth-agnostic `Guard` hook (`func(ctx, write bool) error`) that it consults at
+the start of every read/write before touching the bucket. `pkg/core` therefore
+still imports nothing from `auth` — the namespace layer supplies a `Guard` that
+closes over the compiled policy and the request's subject. `Registry.Authorized`
+resolves the namespace, binds that guard, and returns a namespace-and-format
+scoped `core.Store`; the guard maps reads to `OpRead`
+(existence/listing/read/download-url/tag-ref) and writes to `OpWrite`
+(add/annotate/set-tag). Because the check is in the store itself, there is no
+wrapper handle to navigate around. An unknown namespace maps to namespace
+`ErrNotFound` (404); a denied op maps to `auth.ErrUnauthorized` (403). The
+compiled policy is served from a per-namespace cache (default 60s, including a
+negative entry for missing namespaces) that collapses concurrent misses with
+singleflight and is invalidated immediately by the catalog's `OnChange` hook on
+admin `Put`/`Delete` within a process; across processes the TTL bounds
+staleness. `WithPolicyCacheTTL(0)` disables the cache. The raw `Scoped.Store()`
+(no guard) remains for trusted internal callers; the admin plane and tests use
+unguarded stores directly.
+
+The `echo` surface (`pkg/surface/echo`, mounted only for `--repo-type=echo`) is
+a diagnostic — not a package format — that drives this whole stack
+(credential extraction → OIDC verification → 401 challenge → namespace authz)
+for end-to-end testing, including a real GitHub Actions OIDC token in the
+`oidc-e2e` workflow.
 
 ## Observability (planned)
 

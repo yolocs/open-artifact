@@ -36,20 +36,24 @@ func runServeCapture(t *testing.T, args ...string) (*runtimeConfig, error) {
 func TestServeDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := runServeCapture(t, "--bucket-url", "mem://")
+	cfg, err := runServeCapture(t, "--bucket-url", "mem://",
+		"--authn-oidc-issuers", "https://idp.example",
+		"--authn-oidc-audience", "open-artifact")
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	want := &runtimeConfig{
-		Port:          defaultDataPort,
-		BucketURL:     "mem://",
-		EnableMetrics: true,
-		MetricsPath:   "/metrics",
-		LogLevel:      "info",
-		LogFormat:     "text",
-		AuthnKind:     "oidc",
+		Port:              defaultDataPort,
+		BucketURL:         "mem://",
+		EnableMetrics:     true,
+		MetricsPath:       "/metrics",
+		LogLevel:          "info",
+		LogFormat:         "text",
+		AuthnKind:         "oidc",
+		AuthnOIDCIssuers:  []string{"https://idp.example"},
+		AuthnOIDCAudience: "open-artifact",
 	}
-	if diff := cmp.Diff(want, cfg); diff != "" {
+	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {
 		t.Errorf("config mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -65,6 +69,7 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 		"--log-format", "json",
 		"--enable-metrics=false",
 		"--authn-oidc-issuers", "https://a.example,https://b.example",
+		"--authn-oidc-audience", "open-artifact",
 	)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
@@ -93,6 +98,7 @@ func TestServeEnvResolution(t *testing.T) {
 	t.Setenv("OPEN_ARTIFACT_PORT", "7000")
 	t.Setenv("OPEN_ARTIFACT_LOG_FORMAT", "json")
 	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS", "https://env.example,https://two.example")
+	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE", "open-artifact")
 
 	cfg, err := runServeCapture(t)
 	if err != nil {
@@ -117,7 +123,7 @@ func TestServeFlagBeatsEnv(t *testing.T) {
 	// Mutates process env; no t.Parallel per the env-var exception.
 	t.Setenv("OPEN_ARTIFACT_PORT", "7000")
 
-	cfg, err := runServeCapture(t, "--bucket-url", "mem://", "--port", "9999")
+	cfg, err := runServeCapture(t, "--bucket-url", "mem://", "--port", "9999", "--disable-authn")
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -130,7 +136,7 @@ func TestServePlatformPORT(t *testing.T) {
 	// Mutates process env; no t.Parallel per the env-var exception.
 	t.Setenv("PORT", "6543")
 
-	cfg, err := runServeCapture(t, "--bucket-url", "mem://")
+	cfg, err := runServeCapture(t, "--bucket-url", "mem://", "--disable-authn")
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -144,7 +150,7 @@ func TestServeOpenArtifactPortBeatsPlatformPORT(t *testing.T) {
 	t.Setenv("PORT", "6543")
 	t.Setenv("OPEN_ARTIFACT_PORT", "6000")
 
-	cfg, err := runServeCapture(t, "--bucket-url", "mem://")
+	cfg, err := runServeCapture(t, "--bucket-url", "mem://", "--disable-authn")
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -159,8 +165,29 @@ func TestServeValidationError(t *testing.T) {
 	if _, err := runServeCapture(t); err == nil {
 		t.Fatal("serve without --bucket-url = nil error, want error")
 	}
-	if _, err := runServeCapture(t, "--bucket-url", "mem://", "--repo-type", "rubygems"); err == nil {
+	if _, err := runServeCapture(t, "--bucket-url", "mem://", "--disable-authn", "--repo-type", "rubygems"); err == nil {
 		t.Fatal("serve with bad --repo-type = nil error, want error")
+	}
+}
+
+func TestServeAuthnConfigValidation(t *testing.T) {
+	t.Parallel()
+
+	// Neither --disable-authn nor a usable OIDC config: refuse to start.
+	if _, err := runServeCapture(t, "--bucket-url", "mem://"); err == nil {
+		t.Error("serve without any authn config = nil error, want error")
+	}
+	// OIDC issuers but no audience: refuse to start.
+	if _, err := runServeCapture(t, "--bucket-url", "mem://", "--authn-oidc-issuers", "https://idp"); err == nil {
+		t.Error("serve with issuers but no audience = nil error, want error")
+	}
+	// --disable-authn alone is sufficient.
+	if _, err := runServeCapture(t, "--bucket-url", "mem://", "--disable-authn"); err != nil {
+		t.Errorf("serve with --disable-authn = %v, want nil", err)
+	}
+	// --disable-authn and explicit --authn-kind are mutually exclusive.
+	if _, err := runServeCapture(t, "--bucket-url", "mem://", "--disable-authn", "--authn-kind", "oidc"); err == nil {
+		t.Error("serve with --disable-authn and --authn-kind = nil error, want error")
 	}
 }
 
