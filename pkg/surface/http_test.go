@@ -241,6 +241,7 @@ func TestExtractNamespaceRejectsInvalidRouteValues(t *testing.T) {
 		{name: "leading dot", value: ".internal"},
 		{name: "traversal", value: "../global"},
 		{name: "absolute", value: "/pypi/global"},
+		{name: "slash", value: "pypi/global"},
 		{name: "empty segment", value: "pypi//global"},
 	}
 
@@ -262,18 +263,18 @@ func TestExtractNamespaceRejectsInvalidRouteValues(t *testing.T) {
 	}
 }
 
-func TestExtractNamespaceAcceptsScopedNames(t *testing.T) {
+func TestExtractNamespaceAcceptsNamespaceName(t *testing.T) {
 	t.Parallel()
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetPathValue("namespace", "pypi/global")
+	req.SetPathValue("namespace", "team-a")
 
 	got, err := ExtractNamespace(req, "namespace")
 	if err != nil {
 		t.Fatalf("ExtractNamespace: %v", err)
 	}
-	if got != "pypi/global" {
-		t.Fatalf("namespace = %q, want pypi/global", got)
+	if got != "team-a" {
+		t.Fatalf("namespace = %q, want team-a", got)
 	}
 }
 

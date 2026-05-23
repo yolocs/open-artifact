@@ -10,12 +10,14 @@ const (
 	FormatPyPI Format = "pypi"
 	// FormatNPM is the npm registry protocol.
 	FormatNPM Format = "npm"
+	// FormatMaven is the Maven 2 repository layout.
+	FormatMaven Format = "maven"
 )
 
 // IsKnown reports whether f is a Format this build understands.
 func (f Format) IsKnown() bool {
 	switch f {
-	case FormatPyPI, FormatNPM:
+	case FormatPyPI, FormatNPM, FormatMaven:
 		return true
 	default:
 		return false

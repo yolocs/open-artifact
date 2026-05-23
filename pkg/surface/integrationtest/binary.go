@@ -35,7 +35,7 @@ func BuildOpenArtifact(ctx context.Context, outDir string) (string, error) {
 		return "", fmt.Errorf("integrationtest: create output directory: %w", err)
 	}
 	out := filepath.Join(outDir, "open-artifact")
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./cmd/server")
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./cmd/open-artifact")
 	cmd.Dir = root
 	raw, err := cmd.CombinedOutput()
 	if err != nil {

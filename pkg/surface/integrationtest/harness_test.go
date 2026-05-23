@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"gocloud.dev/blob/memblob"
 
-	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/namespace"
 )
 
@@ -126,46 +126,52 @@ func TestNamespaceHelpersCreateExpectedPolicies(t *testing.T) {
 
 	tests := []struct {
 		name string
-		spec namespace.Spec
-		want namespace.Spec
+		ns   *namespace.Namespace
+		want *namespace.Namespace
 	}{
 		{
 			name: "hosted anonymous reader writer",
-			spec: HostedAnonymous("pypi/global"),
-			want: namespace.Spec{
-				Name: "pypi/global",
-				Kind: namespace.KindHosted,
-				Policy: namespace.Policy{
-					Readers: []namespace.SubjectMatcher{{Issuer: auth.AnonymousIssuer, ID: auth.AnonymousID, Kind: auth.KindAnonymous}},
-					Writers: []namespace.SubjectMatcher{{Issuer: auth.AnonymousIssuer, ID: auth.AnonymousID, Kind: auth.KindAnonymous}},
+			ns:   HostedAnonymous("team-a"),
+			want: &namespace.Namespace{
+				Name: "team-a",
+				Spec: namespace.Spec{
+					Policy: namespace.Policy{
+						Readers: []namespace.SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: namespace.KindAnonymous}},
+						Writers: []namespace.SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: namespace.KindAnonymous}},
+					},
 				},
 			},
 		},
 		{
 			name: "proxy anonymous reader",
-			spec: ProxyAnonymous("npm/global", "https://registry.npmjs.org"),
-			want: namespace.Spec{
-				Name:        "npm/global",
-				Kind:        namespace.KindProxy,
-				UpstreamURL: "https://registry.npmjs.org",
-				Policy: namespace.Policy{
-					Readers: []namespace.SubjectMatcher{{Issuer: auth.AnonymousIssuer, ID: auth.AnonymousID, Kind: auth.KindAnonymous}},
+			ns:   ProxyAnonymous("team-proxy", "https://registry.npmjs.org"),
+			want: &namespace.Namespace{
+				Name: "team-proxy",
+				Spec: namespace.Spec{
+					Mode: namespace.ModeProxy,
+					Proxy: namespace.Proxy{
+						Upstream: "https://registry.npmjs.org",
+					},
+					Policy: namespace.Policy{
+						Readers: []namespace.SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: namespace.KindAnonymous}},
+					},
 				},
 			},
 		},
 		{
 			name: "deny all",
-			spec: DenyAll("maven/global"),
-			want: namespace.Spec{Name: "maven/global", Kind: namespace.KindHosted},
+			ns:   DenyAll("team-deny"),
+			want: &namespace.Namespace{Name: "team-deny", Spec: namespace.Spec{}},
 		},
 		{
 			name: "read only",
-			spec: ReadOnlyAnonymous("pypi/readonly"),
-			want: namespace.Spec{
-				Name: "pypi/readonly",
-				Kind: namespace.KindHosted,
-				Policy: namespace.Policy{
-					Readers: []namespace.SubjectMatcher{{Issuer: auth.AnonymousIssuer, ID: auth.AnonymousID, Kind: auth.KindAnonymous}},
+			ns:   ReadOnlyAnonymous("team-readonly"),
+			want: &namespace.Namespace{
+				Name: "team-readonly",
+				Spec: namespace.Spec{
+					Policy: namespace.Policy{
+						Readers: []namespace.SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: namespace.KindAnonymous}},
+					},
 				},
 			},
 		},
@@ -175,7 +181,7 @@ func TestNamespaceHelpersCreateExpectedPolicies(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if diff := cmp.Diff(tt.want, tt.spec); diff != "" {
+			if diff := cmp.Diff(tt.want, tt.ns); diff != "" {
 				t.Fatalf("namespace helper mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -186,17 +192,24 @@ func TestSeedNamespaceCreatesRegistrySpec(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
-	registry := namespace.NewRegistry()
-	spec := HostedAnonymous("pypi/global")
+	b := memblob.OpenBucket(nil)
+	t.Cleanup(func() { b.Close() })
+	store, err := namespace.NewStore(b, "")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ns := HostedAnonymous("team-a")
 
-	if err := SeedNamespace(ctx, registry, spec, nil); err != nil {
+	if err := SeedNamespace(ctx, store, ns); err != nil {
 		t.Fatalf("SeedNamespace: %v", err)
 	}
-	got, err := registry.Spec(ctx, "pypi/global")
+	got, err := store.Get(ctx, "team-a")
 	if err != nil {
-		t.Fatalf("Spec: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
-	if diff := cmp.Diff(spec, got); diff != "" {
+	want := *ns
+	want.Spec.SchemaVersion = namespace.CurrentSchemaVersion
+	if diff := cmp.Diff(&want, got); diff != "" {
 		t.Fatalf("seeded namespace mismatch (-want +got):\n%s", diff)
 	}
 }

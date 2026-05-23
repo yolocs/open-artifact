@@ -70,7 +70,9 @@ func withStatter(fn statFunc) Option { return func(s *Store) { s.stat = fn } }
 // single backend call.
 func (s *Store) attributes(ctx context.Context, key string) (*blob.Attributes, error) {
 	return s.statCache.getOrCompute(key, func() (*blob.Attributes, error) {
+		start := time.Now()
 		a, err := s.stat(ctx, key)
+		s.observe(opAttributes, start, err)
 		if err != nil {
 			return nil, fmt.Errorf("blobstore: attributes %q: %w", key, mapErr(err))
 		}

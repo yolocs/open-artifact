@@ -40,4 +40,12 @@ type Version interface {
 	// storage; the implementation computes the digest during upload and
 	// records it on the resulting File's Meta.
 	AddFile(ctx context.Context, name string, body io.Reader, opts ...CreateOption) (File, error)
+
+	// Cache returns a handle to a version-level cache file by key (the .cache/
+	// subtree under this Version) without performing I/O.
+	Cache(key string) CacheFile
+
+	// AddCache writes a version-level cache file, mirroring AddFile but always
+	// overwriting (the cache is mutable). Invisible to Files.
+	AddCache(ctx context.Context, key string, body io.Reader) (CacheFile, error)
 }

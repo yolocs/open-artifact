@@ -2,18 +2,18 @@ package surface
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/core"
+	"github.com/yolocs/open-artifact/pkg/logging"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/observability"
 )
 
 type NamespaceErrorContext int
@@ -50,7 +50,8 @@ func WithMaxBody(w http.ResponseWriter, r *http.Request, maxBytes int64) *http.R
 func WriteStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	status, message, known := storeStatus(err)
 	if !known {
-		LoggerFromRequest(r).ErrorContext(r.Context(), "surface store error", slog.Any("error", err))
+		observability.RecordError(r, err)
+		logging.FromContext(r.Context()).Error("surface store error", logging.KeyComponent, "surface", logging.KeyError, err)
 	}
 	WriteError(w, status, message)
 }
@@ -58,7 +59,8 @@ func WriteStoreError(w http.ResponseWriter, r *http.Request, err error) {
 func WriteNamespaceError(w http.ResponseWriter, r *http.Request, err error, ctx NamespaceErrorContext) {
 	status, message, known := namespaceStatus(err, ctx)
 	if !known {
-		LoggerFromRequest(r).ErrorContext(r.Context(), "surface namespace error", slog.Any("error", err))
+		observability.RecordError(r, err)
+		logging.FromContext(r.Context()).Error("surface namespace error", logging.KeyComponent, "surface", logging.KeyError, err)
 	}
 	WriteError(w, status, message)
 }
@@ -73,6 +75,8 @@ func storeStatus(err error) (int, string, bool) {
 		return http.StatusUnprocessableEntity, "digest mismatch", true
 	case errors.Is(err, core.ErrUnsupported):
 		return http.StatusNotImplemented, "unsupported", true
+	case errors.Is(err, core.ErrInvalidName):
+		return http.StatusBadRequest, "invalid name", true
 	default:
 		return http.StatusInternalServerError, "internal server error", false
 	}
@@ -84,6 +88,8 @@ func namespaceStatus(err error, ctx NamespaceErrorContext) (int, string, bool) {
 		return http.StatusBadRequest, "invalid namespace name", true
 	case errors.Is(err, namespace.ErrInvalidProxy):
 		return http.StatusBadRequest, "invalid proxy namespace", true
+	case errors.Is(err, namespace.ErrInvalidPolicy):
+		return http.StatusBadRequest, "invalid namespace policy", true
 	case errors.Is(err, namespace.ErrUnsupportedSchemaVersion):
 		if ctx == NamespaceAdminWrite {
 			return http.StatusBadRequest, "unsupported namespace schema version", true
@@ -184,21 +190,8 @@ func ValidateName(name string) error {
 
 func ExtractNamespace(r *http.Request, varName string) (string, error) {
 	name := r.PathValue(varName)
-	if err := ValidateName(name); err != nil {
+	if err := namespace.ValidateName(name); err != nil {
 		return "", err
 	}
 	return name, nil
-}
-
-func LoggerFromRequest(r *http.Request) *slog.Logger {
-	if logger, ok := r.Context().Value(loggerKey{}).(*slog.Logger); ok && logger != nil {
-		return logger
-	}
-	return slog.Default()
-}
-
-type loggerKey struct{}
-
-func ContextWithLogger(ctx context.Context, logger *slog.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey{}, logger)
 }

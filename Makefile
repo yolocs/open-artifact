@@ -4,8 +4,8 @@
 .PHONY: build test test-integration lint tidy snapshot help
 
 build: ## Build both binaries into ./bin
-	go build -o bin/open-artifact ./cmd/server
-	go build -o bin/open-artifact-client ./cmd/client
+	go build -o bin/open-artifact ./cmd/open-artifact
+	go build -o bin/artctl ./cmd/artctl
 
 test: ## Run unit tests with the race detector
 	go test -race ./...

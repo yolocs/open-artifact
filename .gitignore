@@ -27,9 +27,6 @@ go.work.sum
 # env file
 .env
 
-# Local git worktrees
-.worktrees/
-
 # Editor/IDE
 # .idea/
 # .vscode/
