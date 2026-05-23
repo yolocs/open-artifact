@@ -15,4 +15,8 @@ var (
 	ErrDigestMismatch = errors.New("open-artifact: digest mismatch")
 	// ErrUnsupported is returned for operations a backend cannot perform.
 	ErrUnsupported = errors.New("open-artifact: unsupported")
+	// ErrInvalidName is returned when a caller-provided name (package, version,
+	// file, tag, or cache key) is empty or begins with "." — a leading dot is
+	// reserved for Store-owned objects and is rejected rather than escaped.
+	ErrInvalidName = errors.New("open-artifact: invalid name")
 )

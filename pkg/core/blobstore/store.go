@@ -112,9 +112,11 @@ func (s *Store) authorize(ctx context.Context, write bool) error {
 	return s.guard(ctx, write)
 }
 
-// Package returns a handle to the named Package without performing any I/O.
+// Package returns a handle to the named Package without performing any I/O. An
+// invalid name (empty or leading-dot) is not rejected here — the handle carries
+// the error and every I/O method on it returns ErrInvalidName.
 func (s *Store) Package(name string) core.Package {
-	return &pkg{store: s, name: name}
+	return &pkg{store: s, name: name, nameErr: validateName(name)}
 }
 
 // Packages lists every Package present in the Store's namespace. An empty
@@ -129,7 +131,7 @@ func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
 	}
 	out := make([]core.Package, 0, len(names))
 	for _, n := range names {
-		out = append(out, &pkg{store: s, name: decodePkgName(n)})
+		out = append(out, &pkg{store: s, name: decodeSegment(n)})
 	}
 	return out, nil
 }
@@ -137,6 +139,9 @@ func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
 // AddPackage creates a Package's .meta envelope. With AllowOverwrite=false
 // (the default) a pre-existing .meta yields ErrAlreadyExists.
 func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.CreateOption) (core.Package, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
 	if err := s.authorize(ctx, true); err != nil {
 		return nil, err
 	}
@@ -157,6 +162,36 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 		return nil, err
 	}
 	return &pkg{store: s, name: name}, nil
+}
+
+// Cache returns a handle to a format-level cache file (under the .cache/
+// directory directly beneath the Store's scope) without performing I/O.
+func (s *Store) Cache(key string) core.CacheFile {
+	return newCacheFile(s, scopePrefix(s.scope), key, nil)
+}
+
+// AddCache writes a format-level cache file, overwriting any existing entry.
+func (s *Store) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return s.addCache(ctx, scopePrefix(s.scope), key, nil, body)
+}
+
+// addCache is the shared write path behind every level's AddCache. parentErr
+// carries the owning Package/Version's name validation (nil at the format
+// level). The cache is always mutable, so the write unconditionally overwrites.
+// Filling the cache is part of serving a read (a proxy cold fill), so it
+// authorizes as a read — reader policy is sufficient.
+func (s *Store) addCache(ctx context.Context, dir, key string, parentErr error, body io.Reader) (core.CacheFile, error) {
+	f := newCacheFile(s, dir, key, parentErr)
+	if f.nameErr != nil {
+		return nil, f.nameErr
+	}
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, core.CreateConfig{AllowOverwrite: true}); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // listChildNames lists the immediate, non-dot children under prefix using a
@@ -236,10 +271,12 @@ func (s *Store) upsertAnnotations(ctx context.Context, path string, annotations 
 	return s.writeMeta(ctx, path, m)
 }
 
-// pkg is the blobstore implementation of core.Package.
+// pkg is the blobstore implementation of core.Package. nameErr is set when the
+// handle was built from an invalid name; every I/O method returns it.
 type pkg struct {
-	store *Store
-	name  string
+	store   *Store
+	name    string
+	nameErr error
 }
 
 func (p *pkg) Name() string      { return p.name }
@@ -247,6 +284,9 @@ func (p *pkg) Namespace() string { return p.store.scope }
 func (p *pkg) Store() core.Store { return p.store }
 
 func (p *pkg) Meta(ctx context.Context) (core.Meta, error) {
+	if p.nameErr != nil {
+		return core.Meta{}, p.nameErr
+	}
 	if err := p.store.authorize(ctx, false); err != nil {
 		return core.Meta{}, err
 	}
@@ -254,6 +294,9 @@ func (p *pkg) Meta(ctx context.Context) (core.Meta, error) {
 }
 
 func (p *pkg) Exists(ctx context.Context) (bool, error) {
+	if p.nameErr != nil {
+		return false, p.nameErr
+	}
 	s := p.store
 	if err := s.authorize(ctx, false); err != nil {
 		return false, err
@@ -269,15 +312,23 @@ func (p *pkg) Exists(ctx context.Context) (bool, error) {
 }
 
 func (p *pkg) Annotate(ctx context.Context, annotations map[string]any) error {
+	if p.nameErr != nil {
+		return p.nameErr
+	}
 	if err := p.store.authorize(ctx, true); err != nil {
 		return err
 	}
 	return p.store.upsertAnnotations(ctx, packageMetaPath(p.store.scope, p.name), annotations)
 }
 
-func (p *pkg) Version(name string) core.Version { return &version{pkg: p, name: name} }
+func (p *pkg) Version(name string) core.Version {
+	return &version{pkg: p, name: name, nameErr: firstErr(p.nameErr, validateName(name))}
+}
 
 func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
+	if p.nameErr != nil {
+		return nil, p.nameErr
+	}
 	s := p.store
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
@@ -288,12 +339,15 @@ func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
 	}
 	out := make([]core.Version, 0, len(names))
 	for _, n := range names {
-		out = append(out, &version{pkg: p, name: n})
+		out = append(out, &version{pkg: p, name: decodeSegment(n)})
 	}
 	return out, nil
 }
 
 func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOption) (core.Version, error) {
+	if err := firstErr(p.nameErr, validateName(name)); err != nil {
+		return nil, err
+	}
 	s := p.store
 	if err := s.authorize(ctx, true); err != nil {
 		return nil, err
@@ -317,9 +371,24 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	return &version{pkg: p, name: name}, nil
 }
 
-func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
+// Cache returns a handle to a package-level cache file without performing I/O.
+func (p *pkg) Cache(key string) core.CacheFile {
+	return newCacheFile(p.store, packagePrefix(p.store.scope, p.name), key, p.nameErr)
+}
+
+// AddCache writes a package-level cache file, overwriting any existing entry.
+func (p *pkg) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return p.store.addCache(ctx, packagePrefix(p.store.scope, p.name), key, p.nameErr, body)
+}
+
+func (p *pkg) Tag(name string) core.Tag {
+	return &tag{pkg: p, name: name, nameErr: firstErr(p.nameErr, validateName(name))}
+}
 
 func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
+	if p.nameErr != nil {
+		return nil, p.nameErr
+	}
 	s := p.store
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
@@ -330,22 +399,27 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	}
 	out := make([]core.Tag, 0, len(names))
 	for _, n := range names {
-		out = append(out, &tag{pkg: p, name: n})
+		out = append(out, &tag{pkg: p, name: decodeSegment(n)})
 	}
 	return out, nil
 }
 
 func (p *pkg) SetTag(ctx context.Context, name, target string) error {
+	if err := firstErr(p.nameErr, validateName(name), validateName(target)); err != nil {
+		return err
+	}
 	if err := p.store.authorize(ctx, true); err != nil {
 		return err
 	}
 	return p.store.writeTagTarget(ctx, p.name, name, target)
 }
 
-// version is the blobstore implementation of core.Version.
+// version is the blobstore implementation of core.Version. nameErr carries this
+// handle's (and its package's) name validation.
 type version struct {
-	pkg  *pkg
-	name string
+	pkg     *pkg
+	name    string
+	nameErr error
 }
 
 func (v *version) Name() string          { return v.name }
@@ -353,6 +427,9 @@ func (v *version) Namespace() string     { return v.pkg.store.scope }
 func (v *version) Package() core.Package { return v.pkg }
 
 func (v *version) Meta(ctx context.Context) (core.Meta, error) {
+	if v.nameErr != nil {
+		return core.Meta{}, v.nameErr
+	}
 	s := v.pkg.store
 	if err := s.authorize(ctx, false); err != nil {
 		return core.Meta{}, err
@@ -361,6 +438,9 @@ func (v *version) Meta(ctx context.Context) (core.Meta, error) {
 }
 
 func (v *version) Exists(ctx context.Context) (bool, error) {
+	if v.nameErr != nil {
+		return false, v.nameErr
+	}
 	s := v.pkg.store
 	if err := s.authorize(ctx, false); err != nil {
 		return false, err
@@ -377,6 +457,9 @@ func (v *version) Exists(ctx context.Context) (bool, error) {
 }
 
 func (v *version) Annotate(ctx context.Context, annotations map[string]any) error {
+	if v.nameErr != nil {
+		return v.nameErr
+	}
 	s := v.pkg.store
 	if err := s.authorize(ctx, true); err != nil {
 		return err
@@ -384,9 +467,24 @@ func (v *version) Annotate(ctx context.Context, annotations map[string]any) erro
 	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
 }
 
-func (v *version) File(name string) core.File { return &file{version: v, name: name} }
+// Cache returns a handle to a version-level cache file without performing I/O.
+func (v *version) Cache(key string) core.CacheFile {
+	return newCacheFile(v.pkg.store, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key, v.nameErr)
+}
+
+// AddCache writes a version-level cache file, overwriting any existing entry.
+func (v *version) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return v.pkg.store.addCache(ctx, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key, v.nameErr, body)
+}
+
+func (v *version) File(name string) core.File {
+	return newFile(v, name)
+}
 
 func (v *version) Files(ctx context.Context) ([]core.File, error) {
+	if v.nameErr != nil {
+		return nil, v.nameErr
+	}
 	s := v.pkg.store
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
@@ -397,7 +495,7 @@ func (v *version) Files(ctx context.Context) ([]core.File, error) {
 	}
 	out := make([]core.File, 0, len(names))
 	for _, n := range names {
-		out = append(out, &file{version: v, name: n})
+		out = append(out, newFile(v, decodeSegment(n)))
 	}
 	return out, nil
 }
@@ -407,36 +505,49 @@ func (v *version) Files(ctx context.Context) ([]core.File, error) {
 // and timestamps. With AllowOverwrite=false (the default) a pre-existing blob
 // causes ErrAlreadyExists.
 func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.File, error) {
+	f := newFile(v, name)
+	if f.nameErr != nil {
+		return nil, f.nameErr
+	}
 	s := v.pkg.store
 	if err := s.authorize(ctx, true); err != nil {
 		return nil, err
 	}
-	cfg := core.NewCreateConfig(opts...)
-	blobPath := filePath(s.scope, v.pkg.name, v.name, name)
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, core.NewCreateConfig(opts...)); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
 
+// writeFile streams body to blobKey while computing a rolling SHA256, then
+// writes the .meta sidecar at metaKey carrying the digest and timestamps. With
+// AllowOverwrite=false a pre-existing blob yields ErrAlreadyExists. It is the
+// shared write path behind AddFile and Cache.Put; it does not authorize —
+// callers do, mapping the operation to read or write as appropriate.
+func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.Reader, cfg core.CreateConfig) (core.Meta, error) {
 	if !cfg.AllowOverwrite {
-		exists, err := s.bExists(ctx, blobPath)
+		exists, err := s.bExists(ctx, blobKey)
 		if err != nil {
-			return nil, fmt.Errorf("blobstore: probe %q: %w", blobPath, mapErr(err))
+			return core.Meta{}, fmt.Errorf("blobstore: probe %q: %w", blobKey, mapErr(err))
 		}
 		if exists {
-			return nil, core.ErrAlreadyExists
+			return core.Meta{}, core.ErrAlreadyExists
 		}
 	}
 
-	w, err := s.bNewWriter(ctx, blobPath, nil)
+	w, err := s.bNewWriter(ctx, blobKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("blobstore: open writer %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: open writer %q: %w", blobKey, mapErr(err))
 	}
 
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
 		// Abort the in-flight write so no partial blob is committed.
 		_ = s.closeWriter(w)
-		return nil, fmt.Errorf("blobstore: stream %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: stream %q: %w", blobKey, mapErr(err))
 	}
 	if err := s.closeWriter(w); err != nil {
-		return nil, fmt.Errorf("blobstore: commit %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapErr(err))
 	}
 
 	now := s.now().UTC()
@@ -446,42 +557,80 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 		UpdatedAt:   now,
 		Annotations: cfg.Annotations,
 	}
-	if err := s.writeMeta(ctx, fileMetaPath(s.scope, v.pkg.name, v.name, name), meta); err != nil {
-		// The blob is committed and reachable; the digest is recomputed
-		// lazily on read if the sidecar is absent. Surface the error so the
-		// caller knows the sidecar did not land.
-		return nil, fmt.Errorf("blobstore: write sidecar for %q: %w", blobPath, err)
+	if err := s.writeMeta(ctx, metaKey, meta); err != nil {
+		// The blob is committed and reachable; the digest is recomputed lazily
+		// on read if the sidecar is absent. Surface the error so the caller
+		// knows the sidecar did not land.
+		return core.Meta{}, fmt.Errorf("blobstore: write sidecar %q: %w", metaKey, err)
 	}
-
-	return &file{version: v, name: name}, nil
+	return meta, nil
 }
 
-// file is the blobstore implementation of core.File.
+// file is the blobstore implementation of core.File. It is path-based: blobKey
+// and metaKey are computed once at construction, so the same type backs both a
+// Version's files and a Cache's files (which have no Version parent). version is
+// nil for cache files. nameErr carries the handle's (and its ancestors') name
+// validation.
 type file struct {
-	version *version
+	store   *Store
 	name    string
+	blobKey string
+	metaKey string
+	version *version
+	nameErr error
 }
 
-func (f *file) Name() string          { return f.name }
-func (f *file) Namespace() string     { return f.version.pkg.store.scope }
-func (f *file) Version() core.Version { return f.version }
-func (f *file) Package() core.Package { return f.version.pkg }
-
-func (f *file) store() *Store { return f.version.pkg.store }
-func (f *file) blobPath() string {
-	return filePath(f.store().scope, f.version.pkg.name, f.version.name, f.name)
+// newFile builds a handle to a Version's file.
+func newFile(v *version, name string) *file {
+	s := v.pkg.store
+	return &file{
+		store:   s,
+		name:    name,
+		blobKey: filePath(s.scope, v.pkg.name, v.name, name),
+		metaKey: fileMetaPath(s.scope, v.pkg.name, v.name, name),
+		version: v,
+		nameErr: firstErr(v.nameErr, validateName(name)),
+	}
 }
-func (f *file) metaPath() string {
-	return fileMetaPath(f.store().scope, f.version.pkg.name, f.version.name, f.name)
+
+// newCacheFile builds a handle to a cache file under the .cache/ folder of the
+// level whose prefix is dir. parentErr carries the owning level's name
+// validation (nil at the format level).
+func newCacheFile(s *Store, dir, key string, parentErr error) *file {
+	return &file{
+		store:   s,
+		name:    key,
+		blobKey: cacheFilePath(dir, key),
+		metaKey: cacheMetaPath(dir, key),
+		nameErr: firstErr(parentErr, validateName(key)),
+	}
+}
+
+func (f *file) Name() string      { return f.name }
+func (f *file) Namespace() string { return f.store.scope }
+func (f *file) Version() core.Version {
+	if f.version == nil {
+		return nil
+	}
+	return f.version
+}
+func (f *file) Package() core.Package {
+	if f.version == nil {
+		return nil
+	}
+	return f.version.pkg
 }
 
 func (f *file) Exists(ctx context.Context) (bool, error) {
-	if err := f.store().authorize(ctx, false); err != nil {
+	if f.nameErr != nil {
+		return false, f.nameErr
+	}
+	if err := f.store.authorize(ctx, false); err != nil {
 		return false, err
 	}
-	exists, err := f.store().bExists(ctx, f.blobPath())
+	exists, err := f.store.bExists(ctx, f.blobKey)
 	if err != nil {
-		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobPath(), mapErr(err))
+		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobKey, mapErr(err))
 	}
 	return exists, nil
 }
@@ -490,18 +639,21 @@ func (f *file) Exists(ctx context.Context) (bool, error) {
 // sidecar is absent or corrupted it recomputes the digest by streaming the
 // blob and derives timestamps from the bucket attributes.
 func (f *file) Meta(ctx context.Context) (core.Meta, error) {
-	s := f.store()
+	if f.nameErr != nil {
+		return core.Meta{}, f.nameErr
+	}
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return core.Meta{}, err
 	}
-	raw, err := s.bReadAll(ctx, f.metaPath())
+	raw, err := s.bReadAll(ctx, f.metaKey)
 	if err == nil {
 		if m, derr := decodeMeta(raw); derr == nil {
 			return m, nil
 		}
 		// Corrupted sidecar: fall through to lazy recomputation.
 	} else if gcerrors.Code(err) != gcerrors.NotFound {
-		return core.Meta{}, fmt.Errorf("blobstore: read sidecar %q: %w", f.metaPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: read sidecar %q: %w", f.metaKey, mapErr(err))
 	}
 
 	return f.recomputeMeta(ctx)
@@ -511,21 +663,21 @@ func (f *file) Meta(ctx context.Context) (core.Meta, error) {
 // hash, UpdatedAt from the bucket's ModTime. Returns ErrNotFound if the blob
 // is absent.
 func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
-	s := f.store()
-	attrs, err := s.attributes(ctx, f.blobPath())
+	s := f.store
+	attrs, err := s.attributes(ctx, f.blobKey)
 	if err != nil {
 		return core.Meta{}, err
 	}
 
-	r, err := s.bNewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobKey, nil)
 	if err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: open %q: %w", f.blobKey, mapErr(err))
 	}
 	defer r.Close()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, r); err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: hash %q: %w", f.blobPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: hash %q: %w", f.blobKey, mapErr(err))
 	}
 
 	return core.Meta{
@@ -538,13 +690,16 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 // present, the returned reader verifies the streamed content against it and
 // surfaces ErrDigestMismatch at EOF.
 func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
-	s := f.store()
+	if f.nameErr != nil {
+		return nil, f.nameErr
+	}
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
-	r, err := s.bNewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
+		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobKey, mapErr(err))
 	}
 
 	want := f.sidecarDigest(ctx)
@@ -557,7 +712,7 @@ func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 // sidecarDigest returns the digest recorded in the file's sidecar, or "" when
 // the sidecar is absent or unreadable (digest verification is then skipped).
 func (f *file) sidecarDigest(ctx context.Context) string {
-	raw, err := f.store().bReadAll(ctx, f.metaPath())
+	raw, err := f.store.bReadAll(ctx, f.metaKey)
 	if err != nil {
 		return ""
 	}
@@ -573,11 +728,14 @@ func (f *file) sidecarDigest(ctx context.Context) string {
 // fileblob) report Unimplemented; that miss is cached as an empty string so
 // the surface falls back to streaming Read without re-probing.
 func (f *file) DownloadURL(ctx context.Context) (string, error) {
-	s := f.store()
+	if f.nameErr != nil {
+		return "", f.nameErr
+	}
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return "", err
 	}
-	key := f.blobPath()
+	key := f.blobKey
 	u, err := s.urlCache.getOrCompute(key, func() (string, error) {
 		// The SignedURL expiry equals the cache TTL, clamped by the backend's
 		// own per-cloud maximum, so a cached URL never outlives its validity.
@@ -609,10 +767,31 @@ func (f *file) DownloadURL(ctx context.Context) (string, error) {
 	return u, err
 }
 
-// tag is the blobstore implementation of core.Tag.
+// Delete removes the file's blob and .meta sidecar. It is exposed only through
+// core.CacheFile (cache entries are evictable); regular Files have no Delete in
+// v1. A missing object is not an error. It authorizes as a read, like the rest
+// of the cache lifecycle.
+func (f *file) Delete(ctx context.Context) error {
+	if f.nameErr != nil {
+		return f.nameErr
+	}
+	if err := f.store.authorize(ctx, false); err != nil {
+		return err
+	}
+	for _, key := range []string{f.blobKey, f.metaKey} {
+		if err := f.store.bDelete(ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+			return fmt.Errorf("blobstore: delete %q: %w", key, mapErr(err))
+		}
+	}
+	return nil
+}
+
+// tag is the blobstore implementation of core.Tag. nameErr carries this
+// handle's (and its package's) name validation.
 type tag struct {
-	pkg  *pkg
-	name string
+	pkg     *pkg
+	name    string
+	nameErr error
 }
 
 func (t *tag) Name() string          { return t.name }
@@ -620,6 +799,9 @@ func (t *tag) Namespace() string     { return t.pkg.store.scope }
 func (t *tag) Package() core.Package { return t.pkg }
 
 func (t *tag) Ref(ctx context.Context) (core.Version, error) {
+	if t.nameErr != nil {
+		return nil, t.nameErr
+	}
 	if err := t.pkg.store.authorize(ctx, false); err != nil {
 		return nil, err
 	}
@@ -631,6 +813,9 @@ func (t *tag) Ref(ctx context.Context) (core.Version, error) {
 }
 
 func (t *tag) Exists(ctx context.Context) (bool, error) {
+	if t.nameErr != nil {
+		return false, t.nameErr
+	}
 	s := t.pkg.store
 	if err := s.authorize(ctx, false); err != nil {
 		return false, err

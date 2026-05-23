@@ -1,8 +1,11 @@
 package blobstore
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/yolocs/open-artifact/pkg/core"
 )
 
 func TestPathHelpers(t *testing.T) {
@@ -27,6 +30,9 @@ func TestPathHelpers(t *testing.T) {
 		{"versionMetaPath", versionMetaPath(scope, pkg, ver), "open-artifact/v1/pypi/global/requests/2.31.0/.meta"},
 		{"filePath", filePath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/" + fname},
 		{"fileMetaPath", fileMetaPath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/.meta." + fname},
+		{"cacheFilePath store", cacheFilePath(scopePrefix(scope), "simple:requests"), "open-artifact/v1/pypi/global/.cache/simple%3Arequests"},
+		{"cacheFilePath package", cacheFilePath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/simple"},
+		{"cacheMetaPath", cacheMetaPath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/.meta.simple"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,34 +63,60 @@ func TestScopePrefixNormalization(t *testing.T) {
 	}
 }
 
-func TestPackageNameEncoding(t *testing.T) {
+func TestSegmentEncoding(t *testing.T) {
 	t.Parallel()
 
+	// Only valid names (rejected ones never reach encodeSegment) — none start
+	// with "." so none produces a dot-leading or slash-bearing segment.
 	cases := []struct {
 		name string
 		enc  string
 	}{
 		{"requests", "requests"},
-		{"@scope/name", "@scope%2Fname"},
+		{"2.31.0", "2.31.0"},
+		{"@scope/name", "%40scope%2Fname"},
 		{"a/b/c", "a%2Fb%2Fc"},
-		{"with space", "with%20space"},
+		{"with space", "with+space"},
+		{"colon:name", "colon%3Aname"},
 		{"100%", "100%25"},
 		{"%2F", "%252F"},
+		{"v1.0.0+build", "v1.0.0%2Bbuild"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := encodePkgName(tc.name)
+			got := encodeSegment(tc.name)
 			if got != tc.enc {
-				t.Errorf("encodePkgName(%q) = %q, want %q", tc.name, got, tc.enc)
+				t.Errorf("encodeSegment(%q) = %q, want %q", tc.name, got, tc.enc)
 			}
 			if strings.Contains(got, "/") {
-				t.Errorf("encodePkgName(%q) = %q contains a path separator", tc.name, got)
+				t.Errorf("encodeSegment(%q) = %q contains a path separator", tc.name, got)
 			}
-			if rt := decodePkgName(got); rt != tc.name {
-				t.Errorf("decodePkgName(%q) = %q, want %q", got, rt, tc.name)
+			if strings.HasPrefix(got, ".") {
+				t.Errorf("encodeSegment(%q) = %q starts with a dot", tc.name, got)
+			}
+			if rt := decodeSegment(got); rt != tc.name {
+				t.Errorf("decodeSegment(%q) = %q, want %q", got, rt, tc.name)
 			}
 		})
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"requests", "@scope/name", "2.31.0", "a.b.c", "with space", "v1+build", "foo..bar"}
+	for _, name := range valid {
+		if err := validateName(name); err != nil {
+			t.Errorf("validateName(%q) = %v, want nil", name, err)
+		}
+	}
+
+	invalid := []string{"", ".", "..", ".meta", ".cache", ".tags", ".hidden"}
+	for _, name := range invalid {
+		if err := validateName(name); !errors.Is(err, core.ErrInvalidName) {
+			t.Errorf("validateName(%q) = %v, want core.ErrInvalidName", name, err)
+		}
 	}
 }
 
@@ -92,7 +124,7 @@ func TestPackagePrefixEncodesScopedName(t *testing.T) {
 	t.Parallel()
 
 	got := packageMetaPath("team-a/npm", "@scope/name")
-	want := "open-artifact/v1/team-a/npm/@scope%2Fname/.meta"
+	want := "open-artifact/v1/team-a/npm/%40scope%2Fname/.meta"
 	if got != want {
 		t.Errorf("packageMetaPath = %q, want %q", got, want)
 	}

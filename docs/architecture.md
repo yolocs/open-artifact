@@ -9,10 +9,11 @@ for how to run and configure the binary see
 
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
-logging, server lifecycle), namespaces, auth, and observability exist today;
-the proxy primitives and the format surfaces are described here as the design
-they are being built toward. Where it matters, sections note what is
-implemented versus planned.
+logging, server lifecycle), namespaces, auth, observability, and the shared
+proxy primitives exist today; the format surfaces that wire those primitives
+into PyPI/npm/Maven proxy mode are described here as the design they are being
+built toward. Where it matters, sections note what is implemented versus
+planned.
 
 ## What this project is
 
@@ -109,8 +110,8 @@ pkg/
   command/           ← cobra/viper command tree, config resolution + validation
   bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
   serving/           ← shared HTTP server lifecycle (graceful shutdown) + logger middleware
-  core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
-    blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
+  core/              ← data nouns, Format enum, Store/Cache interfaces, Meta, sentinel errors
+    blobstore/       ← core.Store + core.Cache implemented over a gocloud.dev/blob bucket
   logging/           ← slog setup, context helpers, stable fields
   namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory
   auth/              ← Authenticator/Authorizer, middleware, sentinels
@@ -118,7 +119,11 @@ pkg/
     chain/           ← multi-issuer authenticator chain
   metrics/           ← Recorder interface, NoOp + Prometheus impls
   observability/     ← liveness/readiness/metrics wrapper, request metrics + logging, format/op labeling
-  proxy/             ← upstream HTTP client, blob-backed cache, negative cache, filters (planned)
+  proxy/             ← shared pull-through primitives (format-agnostic)
+    httpclient/      ← context-aware upstream GET/HEAD with body caps + status mapping
+    negcache/        ← in-memory negative cache for upstream 404s
+    singleflight/    ← typed cold-fill coalescer
+    filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     admin/           ← namespace CRUD HTTP API
     pypi/            ← PEP 503/691 hosted + proxy (planned)
@@ -197,11 +202,23 @@ The data-plane factory binds a `blobstore.Store` to scope `<ns>/<fmt>`; the
 blobstore path helpers lay out everything from `<package>` down. The namespace
 catalog (admin plane) owns the `<ns>/.meta` object and is its only writer.
 
-A package name that contains `/` — npm scoped names like `@scope/name` — is
-percent-encoded into a single path segment by the blobstore path helpers
-(`@scope%2Fname`) so it stays one bucket child and round-trips losslessly
-through listing. The encoding is internal to `blobstore`; callers use the
-logical name.
+**`blobstore` owns name encoding and validation; callers pass raw names.** Every
+user-provided name component — package, version, file, tag, cache key — is
+rendered into a single path-safe bucket segment by one helper
+(`encodeSegment`/`decodeSegment`, built on `url.QueryEscape`) and round-trips
+losslessly through listing. `QueryEscape` escapes aggressively — every reserved
+or non-alphanumeric byte except `-_.~` — so the segment stays broadly
+blob-backend compatible (npm scoped names like `@scope/name` →
+`%40scope%2Fname` stay one bucket child rather than nesting; `:` → `%3A` etc.).
+A name that is empty or **begins with `.`** is **rejected** (`ErrInvalidName`),
+not escaped: a leading dot is reserved for Store-owned objects
+(`.meta`/`.tags`/`.cache`), and there is no legitimate reason to accept such
+input, so the Store refuses it rather than smuggling it through. A valid name
+never QueryEscapes to a leading `.`, so an encoded segment can never collide
+with a reserved dot-file. Validation runs on both read and write paths (a no-I/O
+handle built from a bad name carries the error and surfaces it on first use), so
+a surface does **not** sanitize names — it forwards whatever a client sends and
+the Store keeps it safe, lossless, or rejected.
 
 **No side indexes — listing is the index.** The namespace catalog is the
 top-level child listing under the root (drop dot-entries); a namespace
@@ -209,22 +226,31 @@ top-level child listing under the root (drop dot-entries); a namespace
 anything is written under it. Delete-emptiness is "no non-dot children under
 `<ns>/`". There are no `_control`/`namespace-index`/`package-index` sentinels.
 
-**Caches live in `.cache/`, at the level they apply** — namespace,
-format (proxy pull-through cache for proxy namespaces), or package. A proxy
-namespace caches upstream metadata+body under `<ns>/<fmt>/.cache/...`
-(e.g. `<sha256(key)>.body` + `<sha256(key)>.json`). Everything under a
-`.cache/` is opaque to `core.Store` and never appears in package/version/file
-listings.
+**Caches are Files in `.cache/`, at the level they apply**, and follow the File
+verb pattern: each level has `AddCache(ctx, key, body)` (write, mirroring
+`AddFile`) and `Cache(key)` (a no-I/O handle, mirroring `File`) on `Store`
+(format level), `Package`, and `Version`. The handle is a `core.CacheFile` —
+the same blob+`.meta` sidecar storage as a regular File, reusing the same
+read/digest/write code, differing only in living under a reserved `.cache/`
+folder, being mutable+evictable (`AddCache` overwrites; the handle has
+`Delete`), and having no Package/Version parent. A proxy namespace caches
+upstream index/metadata (a PyPI simple page, an npm packument) keyed by a
+logical name (e.g. `simple:requests`); artifact bytes are **not** cached — they
+become real Files via `AddFile`. Cache files never appear in
+`Packages`/`Versions`/`Files` listings (the `.cache/` segment is a dropped
+dot-entry); writing a package/version-level cache does, like any object,
+materialize that package/version directory. Cache fill authorizes as a **read**,
+so reader policy suffices.
 
 **Reserved-name discipline — one rule, every level.** A leading `.` is
 reserved at every directory level; listings drop dot-entries when enumerating
-real children (namespaces, formats, packages, versions, files). Because
-namespace names may not begin with `.` or `_` (see name validation below) and
-formats are a fixed allow-list, namespace/format directories never collide
-with the dot-prefixed metadata/cache objects. The format codec in each surface
-**must reject** leading `.`, `..`, absolute paths, and empty path segments in
-user-provided package/version/file/tag names — so user data is never silently
-hidden.
+real children (namespaces, formats, packages, versions, files). Namespace names
+may not begin with `.` or `_` and formats are a fixed allow-list, so
+namespace/format directories never collide with dot-prefixed metadata/cache
+objects. At the package/version/file/tag level, `blobstore` **rejects** a
+user name that begins with `.` (`ErrInvalidName`), so user data can never be
+silently hidden or collide with `.meta`/`.tags`/`.cache` — the Store guarantees
+this rather than relying on each surface codec to reject names.
 
 `.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
 opaque caller-owned `Annotations map[string]any` the Store round-trips but
@@ -394,17 +420,66 @@ and `request_id` (`X-Request-Id`), and an `error` only when one is explicitly
 recorded with `observability.RecordError`. The query string is omitted and the
 `Authorization` header is never logged.
 
-## Proxy primitives (planned)
+## Proxy primitives
 
-Shared, format-agnostic pull-through machinery: a context-aware upstream HTTP
-client with body caps, a blob-backed mutable metadata+body cache under the
-format-level `<ns>/<fmt>/.cache/`, an in-memory negative cache for upstream
-404s, process-local singleflight for cold fills, and an ordered
-allow/deny/delay filter chain validated as part of namespace spec validation.
-Cold-miss bytes flow through open-artifact (never redirect clients to public
-upstream URLs); cache hits may still use backend signed-URL redirects because
-those target the operator-controlled bucket. Reader policy is sufficient to
-populate cache.
+Shared, format-agnostic pull-through machinery, built so proxy-mode format
+surfaces can compose it without depending on each other. The HTTP client,
+negative cache, singleflight, and filters live under `pkg/proxy`; the
+metadata blob cache lives on the `core` nouns themselves (see below).
+
+- **`pkg/proxy/httpclient`** — a context-aware upstream client with context-aware
+  `Get`/`Head`, a configurable buffered-body cap (oversized bodies fail with
+  `ErrOversized` before unbounded buffering), and status-mapping helpers
+  (`IsOK`/`IsNotFound`/`IsServerError`) so a clean upstream 404 is distinguishable
+  from an unavailable or malformed upstream. An HTTP status is never an error;
+  errors are reserved for transport failure, cancellation, oversize, or read
+  failure. Its default transport assumes **HTTP/2** (negotiated over TLS via
+  ALPN) and ships sane defaults — a warm per-host idle connection pool and
+  dial/TLS/response-header/idle timeouts; there is no blanket client timeout
+  (overall deadlines come from the request context, so artifact streams aren't
+  capped). The underlying `*http.Client` is injectable for tests. It carries no
+  package-format behavior.
+- **the `.cache/` cache lives on the `core` nouns as Files**, following the File
+  verb pattern: `AddCache(ctx, key, body)` writes (like `AddFile`) and
+  `Cache(key)` returns a no-I/O `core.CacheFile` handle (like `File`) on `Store`
+  (format level), `Package`, and `Version`. A cache file is the same
+  blob+`.meta` storage and read/digest code as a regular File, under a reserved
+  `.cache/` folder, keyed by a logical name (`encodeSegment`-escaped, e.g.
+  `simple:requests`). `AddCache` is mutable (overwrites) and the handle is
+  evictable (`Delete`); freshness comes from `Meta.UpdatedAt`. It caches only
+  **derived index/metadata**; artifact bytes are written as real
+  Packages/Versions/Files and served like hosted content. Cache files never
+  appear in listings, and the format-level cache is fully invisible to
+  `Packages`. Cache ops authorize as **reads**, so reader policy is sufficient
+  (the guard maps cache fill to `OpRead`).
+- **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
+  repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
+  short default TTL (~30s). It is reconstructible and never persisted to the
+  bucket.
+- **`pkg/proxy/singleflight`** — a typed wrapper over
+  `golang.org/x/sync/singleflight` that collapses concurrent cold misses for one
+  key into a single fill per process. Different replicas may each fetch; that is
+  acceptable for a pull-through cache.
+- **`pkg/proxy/filter`** — the ordered allow/deny/delay filter chain: the
+  persisted config schema (`Spec`/`Rule`), its validation, and the decision
+  engine (`Ref` → `Decision`). The schema lives here as the single source of
+  truth; `pkg/namespace` embeds `filter.Spec` in its proxy block and validates
+  the chain through `filter.Validate` during spec validation (so `namespace`
+  depends on this pure, stdlib-only leaf, not the reverse). Kinds: `allow`/`deny`
+  match `path.Match` globs (so `*` does not cross `/`, which matters for npm
+  scoped names) and/or package/version rules — first decision wins, abstain
+  moves on, all-abstain defaults to allow; `delay` quarantines artifacts younger
+  than `min_age` and asks for metadata when the publish time is unknown. Filters
+  apply only to artifact/file downloads, never to index/metadata listings.
+
+On a cold miss the surface fetches from upstream and **writes artifact files
+into the namespace's `core.Store` as real Packages/Versions/Files**, so they are
+served from our bucket thereafter exactly like hosted content; only derived
+index/metadata lands in `.cache/`. Cold-miss bytes flow through open-artifact
+(never redirect clients to public upstream URLs); a Store-hosted artifact may
+still use backend signed-URL redirects because those target the
+operator-controlled bucket. Reader policy is sufficient to populate both the
+Store and the cache.
 
 ## gocloud.dev/blob notes
 
@@ -462,9 +537,12 @@ shapes, and test layout.
    `--allow-overwrite`) and proxy (writes disabled, pull-through via the proxy
    primitives). Read `Spec.Mode` per request so admin mode switches take
    effect without restart.
-3. Format codec rejects leading-dot/`..`/absolute/empty-segment names and
-   internal-prefix collisions; maps `core`/`namespace`/`auth` sentinels to
-   the format's HTTP error shape via the shared `surface` helpers.
+3. Format codec maps the wire protocol to logical package/version/file/tag
+   names and passes them through raw — `blobstore` owns path-safe encoding and
+   rejects empty/leading-dot names (`ErrInvalidName`), so the codec does not
+   sanitize names; it just maps that and the other
+   `core`/`namespace`/`auth` sentinels to the format's HTTP error shape via the
+   shared `surface` helpers.
 4. Use the shared helpers: JSON/error writers, `RedirectOrStreamFile`, HEAD
    handling, `MaxBytesReader`, metrics op labeling.
 5. Unit tests for the codec + handler; integration tests against `mem://`;
