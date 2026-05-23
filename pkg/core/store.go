@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Store is the root handle for a single namespace. It is namespace-bound at
 // construction; the namespace (a path prefix like "pypi/global") is never an
@@ -25,8 +28,12 @@ type Store interface {
 	// creation-time annotations via WithAnnotations.
 	AddPackage(ctx context.Context, name string, opts ...CreateOption) (Package, error)
 
-	// Cache returns the format-level opaque blob cache (the .cache/ subtree
-	// directly under the Store's namespace). Used by proxy surfaces to cache
-	// upstream index/metadata; invisible to Packages.
-	Cache() Cache
+	// Cache returns a handle to a format-level cache file by key (the .cache/
+	// subtree directly under the Store's namespace) without performing I/O.
+	Cache(key string) CacheFile
+
+	// AddCache writes (overwriting) a format-level cache file, mirroring
+	// AddFile. Used by proxy surfaces to cache upstream index/metadata;
+	// invisible to Packages.
+	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
 }

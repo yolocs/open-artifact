@@ -222,15 +222,18 @@ top-level child listing under the root (drop dot-entries); a namespace
 anything is written under it. Delete-emptiness is "no non-dot children under
 `<ns>/`". There are no `_control`/`namespace-index`/`package-index` sentinels.
 
-**Caches are Files in `.cache/`, at the level they apply** — `Store.Cache()`
-(format level), `Package.Cache()`, and `Version.Cache()` each expose a
-`core.Cache` whose entries are `core.CacheFile`s: the same blob+`.meta` sidecar
-storage as a regular File, reusing the same read/digest/write code, differing
-only in living under a reserved `.cache/` folder and having no Version parent. A
-proxy namespace caches upstream index/metadata (a PyPI simple page, an npm
-packument) keyed by a logical name (e.g. `simple:requests`); artifact bytes are
-**not** cached — they become real Files via `AddFile`. Cache files never appear
-in `Packages`/`Versions`/`Files` listings (the `.cache/` segment is a dropped
+**Caches are Files in `.cache/`, at the level they apply**, and follow the File
+verb pattern: each level has `AddCache(ctx, key, body)` (write, mirroring
+`AddFile`) and `Cache(key)` (a no-I/O handle, mirroring `File`) on `Store`
+(format level), `Package`, and `Version`. The handle is a `core.CacheFile` —
+the same blob+`.meta` sidecar storage as a regular File, reusing the same
+read/digest/write code, differing only in living under a reserved `.cache/`
+folder, being mutable+evictable (`AddCache` overwrites; the handle has
+`Delete`), and having no Package/Version parent. A proxy namespace caches
+upstream index/metadata (a PyPI simple page, an npm packument) keyed by a
+logical name (e.g. `simple:requests`); artifact bytes are **not** cached — they
+become real Files via `AddFile`. Cache files never appear in
+`Packages`/`Versions`/`Files` listings (the `.cache/` segment is a dropped
 dot-entry); writing a package/version-level cache does, like any object,
 materialize that package/version directory. Cache fill authorizes as a **read**,
 so reader policy suffices.
@@ -428,18 +431,19 @@ metadata blob cache lives on the `core` nouns themselves (see below).
   errors are reserved for transport failure, cancellation, oversize, or read
   failure. The underlying `*http.Client` is injectable for tests. It carries no
   package-format behavior.
-- **the `.cache/` cache lives on the `core` nouns as Files**, not in a separate
-  object: `Store.Cache()` (format level), `Package.Cache()`, and
-  `Version.Cache()` each return a `core.Cache` whose entries are
-  `core.CacheFile`s — the same blob+`.meta` storage and read/digest code as a
-  regular File, under a reserved `.cache/` folder, keyed by a logical name
-  (`encodeSegment`-escaped, e.g. `simple:requests`). `Put` is mutable
-  (overwrites); freshness comes from `Meta.UpdatedAt`. It caches only **derived
-  index/metadata**; artifact bytes are written as real Packages/Versions/Files
-  and served like hosted content. Cache files never appear in listings, and the
-  format-level cache is fully invisible to `Packages`. Cache ops authorize as
-  **reads**, so reader policy is sufficient (the guard maps cache fill to
-  `OpRead`).
+- **the `.cache/` cache lives on the `core` nouns as Files**, following the File
+  verb pattern: `AddCache(ctx, key, body)` writes (like `AddFile`) and
+  `Cache(key)` returns a no-I/O `core.CacheFile` handle (like `File`) on `Store`
+  (format level), `Package`, and `Version`. A cache file is the same
+  blob+`.meta` storage and read/digest code as a regular File, under a reserved
+  `.cache/` folder, keyed by a logical name (`encodeSegment`-escaped, e.g.
+  `simple:requests`). `AddCache` is mutable (overwrites) and the handle is
+  evictable (`Delete`); freshness comes from `Meta.UpdatedAt`. It caches only
+  **derived index/metadata**; artifact bytes are written as real
+  Packages/Versions/Files and served like hosted content. Cache files never
+  appear in listings, and the format-level cache is fully invisible to
+  `Packages`. Cache ops authorize as **reads**, so reader policy is sufficient
+  (the guard maps cache fill to `OpRead`).
 - **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
   repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
   short default TTL (~30s). It is reconstructible and never persisted to the

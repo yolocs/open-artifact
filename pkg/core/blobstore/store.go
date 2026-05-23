@@ -159,10 +159,31 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	return &pkg{store: s, name: name}, nil
 }
 
-// Cache returns the format-level cache, rooted at the .cache/ directory
-// directly under the Store's scope.
-func (s *Store) Cache() core.Cache {
-	return &cacheHandle{store: s, dir: scopePrefix(s.scope)}
+// Cache returns a handle to a format-level cache file (under the .cache/
+// directory directly beneath the Store's scope) without performing I/O.
+func (s *Store) Cache(key string) core.CacheFile {
+	return newCacheFile(s, scopePrefix(s.scope), key)
+}
+
+// AddCache writes a format-level cache file, overwriting any existing entry.
+func (s *Store) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+	return s.addCache(ctx, scopePrefix(s.scope), key, body, opts...)
+}
+
+// addCache is the shared write path behind every level's AddCache. Filling the
+// cache is part of serving a read (a proxy cold fill), so it authorizes as a
+// read — reader policy is sufficient. The cache is mutable, so writes overwrite.
+func (s *Store) addCache(ctx context.Context, dir, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	f := newCacheFile(s, dir, key)
+	cfg := core.NewCreateConfig(opts...)
+	cfg.AllowOverwrite = true
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, cfg); err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // listChildNames lists the immediate, non-dot children under prefix using a
@@ -323,10 +344,14 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	return &version{pkg: p, name: name}, nil
 }
 
-// Cache returns the package-level cache, rooted at the .cache/ directory under
-// this Package.
-func (p *pkg) Cache() core.Cache {
-	return &cacheHandle{store: p.store, dir: packagePrefix(p.store.scope, p.name)}
+// Cache returns a handle to a package-level cache file without performing I/O.
+func (p *pkg) Cache(key string) core.CacheFile {
+	return newCacheFile(p.store, packagePrefix(p.store.scope, p.name), key)
+}
+
+// AddCache writes a package-level cache file, overwriting any existing entry.
+func (p *pkg) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+	return p.store.addCache(ctx, packagePrefix(p.store.scope, p.name), key, body, opts...)
 }
 
 func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
@@ -396,10 +421,14 @@ func (v *version) Annotate(ctx context.Context, annotations map[string]any) erro
 	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
 }
 
-// Cache returns the version-level cache, rooted at the .cache/ directory under
-// this Version.
-func (v *version) Cache() core.Cache {
-	return &cacheHandle{store: v.pkg.store, dir: versionPrefix(v.pkg.store.scope, v.pkg.name, v.name)}
+// Cache returns a handle to a version-level cache file without performing I/O.
+func (v *version) Cache(key string) core.CacheFile {
+	return newCacheFile(v.pkg.store, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key)
+}
+
+// AddCache writes a version-level cache file, overwriting any existing entry.
+func (v *version) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+	return v.pkg.store.addCache(ctx, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key, body, opts...)
 }
 
 func (v *version) File(name string) core.File { return newFile(v, name) }
@@ -667,43 +696,17 @@ func (f *file) DownloadURL(ctx context.Context) (string, error) {
 	return u, err
 }
 
-// cacheHandle is the blobstore implementation of core.Cache. It is bound to one
-// level's .cache/ folder (dir is that level's prefix, ending in "/") and reuses
-// the file implementation for its entries — a cache file is a File except for
-// its location and the absence of a Version parent.
-//
-// Cache operations authorize as reads, not writes: filling the cache is part of
-// serving a read (a proxy cold fill), so reader policy is sufficient.
-type cacheHandle struct {
-	store *Store
-	dir   string
-}
-
-func (c *cacheHandle) File(name string) core.CacheFile {
-	return newCacheFile(c.store, c.dir, name)
-}
-
-func (c *cacheHandle) Put(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
-	if err := c.store.authorize(ctx, false); err != nil {
-		return nil, err
-	}
-	f := newCacheFile(c.store, c.dir, name)
-	cfg := core.NewCreateConfig(opts...)
-	cfg.AllowOverwrite = true // the cache is mutable; a refill replaces the entry
-	if _, err := c.store.writeFile(ctx, f.blobKey, f.metaKey, body, cfg); err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-func (c *cacheHandle) Delete(ctx context.Context, name string) error {
-	if err := c.store.authorize(ctx, false); err != nil {
+// Delete removes the file's blob and .meta sidecar. It is exposed only through
+// core.CacheFile (cache entries are evictable); regular Files have no Delete in
+// v1. A missing object is not an error. It authorizes as a read, like the rest
+// of the cache lifecycle.
+func (f *file) Delete(ctx context.Context) error {
+	if err := f.store.authorize(ctx, false); err != nil {
 		return err
 	}
-	f := newCacheFile(c.store, c.dir, name)
 	for _, key := range []string{f.blobKey, f.metaKey} {
-		if err := c.store.bDelete(ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
-			return fmt.Errorf("blobstore: delete cache %q: %w", key, mapErr(err))
+		if err := f.store.bDelete(ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+			return fmt.Errorf("blobstore: delete %q: %w", key, mapErr(err))
 		}
 	}
 	return nil

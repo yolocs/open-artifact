@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Package is a handle to a named artifact within a Store's namespace.
 type Package interface {
@@ -51,8 +54,12 @@ type Package interface {
 	// object per Package.
 	SetTag(ctx context.Context, name, target string) error
 
-	// Cache returns the package-level opaque blob cache (the .cache/ subtree
-	// under this Package). Used by proxy surfaces to cache a package's upstream
+	// Cache returns a handle to a package-level cache file by key (the .cache/
+	// subtree under this Package) without performing I/O.
+	Cache(key string) CacheFile
+
+	// AddCache writes (overwriting) a package-level cache file, mirroring
+	// AddFile. Used by proxy surfaces to cache a package's upstream
 	// index/metadata; invisible to Versions/Files.
-	Cache() Cache
+	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
 }

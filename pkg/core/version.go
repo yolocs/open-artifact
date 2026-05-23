@@ -41,7 +41,11 @@ type Version interface {
 	// records it on the resulting File's Meta.
 	AddFile(ctx context.Context, name string, body io.Reader, opts ...CreateOption) (File, error)
 
-	// Cache returns the version-level opaque blob cache (the .cache/ subtree
-	// under this Version). Invisible to Files.
-	Cache() Cache
+	// Cache returns a handle to a version-level cache file by key (the .cache/
+	// subtree under this Version) without performing I/O.
+	Cache(key string) CacheFile
+
+	// AddCache writes (overwriting) a version-level cache file, mirroring
+	// AddFile. Invisible to Files.
+	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
 }

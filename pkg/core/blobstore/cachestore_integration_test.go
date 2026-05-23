@@ -23,8 +23,9 @@ func readAll(t *testing.T, rc io.ReadCloser) string {
 	return string(b)
 }
 
-// TestCacheRoundTrip exercises the cache as a File: Put streams a blob, File
-// reads it back (digest-verified) with metadata, and Delete removes it.
+// TestCacheRoundTrip exercises the cache as a File: AddCache streams a blob,
+// Cache(key) reads it back (digest-verified) with metadata, and Delete removes
+// it.
 func TestCacheRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -34,19 +35,19 @@ func TestCacheRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-		c := s.Package("requests").Cache()
+		pkg := s.Package("requests")
 		const key = "simple"
 		body := []byte("<html>requests</html>")
 
-		cf, err := c.Put(ctx, key, bytes.NewReader(body))
+		cf, err := pkg.AddCache(ctx, key, bytes.NewReader(body))
 		if err != nil {
-			t.Fatalf("Put = %v", err)
+			t.Fatalf("AddCache = %v", err)
 		}
 		if cf.Name() != key {
 			t.Fatalf("Name = %q, want %q", cf.Name(), key)
 		}
 
-		got := c.File(key)
+		got := pkg.Cache(key)
 		if ok, err := got.Exists(ctx); err != nil || !ok {
 			t.Fatalf("Exists = (%v, %v), want true", ok, err)
 		}
@@ -65,11 +66,11 @@ func TestCacheRoundTrip(t *testing.T) {
 			t.Fatalf("Meta missing digest/timestamp: %+v", meta)
 		}
 
-		// Cache is mutable: a second Put overwrites without ErrAlreadyExists.
-		if _, err := c.Put(ctx, key, bytes.NewReader([]byte("v2"))); err != nil {
-			t.Fatalf("Put overwrite = %v", err)
+		// Cache is mutable: a second AddCache overwrites without ErrAlreadyExists.
+		if _, err := pkg.AddCache(ctx, key, bytes.NewReader([]byte("v2"))); err != nil {
+			t.Fatalf("AddCache overwrite = %v", err)
 		}
-		rc2, err := c.File(key).Read(ctx)
+		rc2, err := pkg.Cache(key).Read(ctx)
 		if err != nil {
 			t.Fatalf("Read after overwrite = %v", err)
 		}
@@ -77,14 +78,14 @@ func TestCacheRoundTrip(t *testing.T) {
 			t.Fatalf("after overwrite Read = %q, want v2", data)
 		}
 
-		if err := c.Delete(ctx, key); err != nil {
+		if err := pkg.Cache(key).Delete(ctx); err != nil {
 			t.Fatalf("Delete = %v", err)
 		}
-		if ok, err := c.File(key).Exists(ctx); err != nil || ok {
+		if ok, err := pkg.Cache(key).Exists(ctx); err != nil || ok {
 			t.Fatalf("Exists after Delete = (%v, %v), want false", ok, err)
 		}
 		// Deleting an absent entry is not an error.
-		if err := c.Delete(ctx, key); err != nil {
+		if err := pkg.Cache(key).Delete(ctx); err != nil {
 			t.Fatalf("Delete absent = %v, want nil", err)
 		}
 	})
@@ -105,17 +106,18 @@ func TestCacheLevelsIsolated(t *testing.T) {
 		ver := pkg.Version("2.31.0")
 
 		const key = "index"
-		put := func(c core.Cache, body string) {
-			if _, err := c.Put(ctx, key, bytes.NewReader([]byte(body))); err != nil {
-				t.Fatalf("Put = %v", err)
-			}
+		if _, err := s.AddCache(ctx, key, bytes.NewReader([]byte("store"))); err != nil {
+			t.Fatalf("store AddCache = %v", err)
 		}
-		put(s.Cache(), "store")
-		put(pkg.Cache(), "package")
-		put(ver.Cache(), "version")
+		if _, err := pkg.AddCache(ctx, key, bytes.NewReader([]byte("package"))); err != nil {
+			t.Fatalf("package AddCache = %v", err)
+		}
+		if _, err := ver.AddCache(ctx, key, bytes.NewReader([]byte("version"))); err != nil {
+			t.Fatalf("version AddCache = %v", err)
+		}
 
-		check := func(name string, c core.Cache, want string) {
-			rc, err := c.File(key).Read(ctx)
+		check := func(name string, cf core.CacheFile, want string) {
+			rc, err := cf.Read(ctx)
 			if err != nil {
 				t.Fatalf("%s Read = %v", name, err)
 			}
@@ -123,9 +125,9 @@ func TestCacheLevelsIsolated(t *testing.T) {
 				t.Fatalf("%s cache = %q, want %q", name, got, want)
 			}
 		}
-		check("store", s.Cache(), "store")
-		check("package", pkg.Cache(), "package")
-		check("version", ver.Cache(), "version")
+		check("store", s.Cache(key), "store")
+		check("package", pkg.Cache(key), "package")
+		check("version", ver.Cache(key), "version")
 	})
 }
 
@@ -142,8 +144,8 @@ func TestFormatCacheInvisibleToPackages(t *testing.T) {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
 
-		if _, err := s.Cache().Put(ctx, "root-index", bytes.NewReader([]byte("x"))); err != nil {
-			t.Fatalf("store Put = %v", err)
+		if _, err := s.AddCache(ctx, "root-index", bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("store AddCache = %v", err)
 		}
 		if pkgs, err := s.Packages(ctx); err != nil || len(pkgs) != 0 {
 			t.Fatalf("Packages = (%v, %v), want empty (format cache must be invisible)", pkgs, err)
@@ -178,16 +180,16 @@ func TestCacheBlobNotListedAtItsLevel(t *testing.T) {
 		}
 
 		pkg := s.Package("requests")
-		if _, err := pkg.Cache().Put(ctx, "simple", bytes.NewReader([]byte("x"))); err != nil {
-			t.Fatalf("package Put = %v", err)
+		if _, err := pkg.AddCache(ctx, "simple", bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("package AddCache = %v", err)
 		}
 		if vers, err := pkg.Versions(ctx); err != nil || len(vers) != 0 {
 			t.Fatalf("Versions = (%v, %v), want empty (cache blob is not a version)", vers, err)
 		}
 
 		ver := pkg.Version("2.31.0")
-		if _, err := ver.Cache().Put(ctx, "meta", bytes.NewReader([]byte("x"))); err != nil {
-			t.Fatalf("version Put = %v", err)
+		if _, err := ver.AddCache(ctx, "meta", bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("version AddCache = %v", err)
 		}
 		if files, err := ver.Files(ctx); err != nil || len(files) != 0 {
 			t.Fatalf("Files = (%v, %v), want empty (cache blob is not a file)", files, err)
@@ -196,7 +198,7 @@ func TestCacheBlobNotListedAtItsLevel(t *testing.T) {
 }
 
 // TestCacheAuthorizesAsRead proves filling the cache needs only reader policy:
-// a guard that allows reads but denies writes still permits Cache.Put, while a
+// a guard that allows reads but denies writes still permits AddCache, while a
 // guard that denies reads blocks it.
 func TestCacheAuthorizesAsRead(t *testing.T) {
 	t.Parallel()
@@ -209,10 +211,10 @@ func TestCacheAuthorizesAsRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-		if _, err := s.Cache().Put(ctx, "k", bytes.NewReader([]byte("x"))); err != nil {
-			t.Fatalf("Cache.Put under read-only guard = %v, want allowed (reader fills cache)", err)
+		if _, err := s.AddCache(ctx, "k", bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("AddCache under read-only guard = %v, want allowed (reader fills cache)", err)
 		}
-		if _, err := s.Cache().File("k").Read(ctx); err != nil {
+		if _, err := s.Cache("k").Read(ctx); err != nil {
 			t.Fatalf("Cache read under read-only guard = %v, want allowed", err)
 		}
 		if readOnly.writes != 0 {
@@ -224,8 +226,8 @@ func TestCacheAuthorizesAsRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-		if _, err := s2.Cache().Put(ctx, "k", bytes.NewReader([]byte("x"))); !errors.Is(err, errDenied) {
-			t.Fatalf("Cache.Put under read-denying guard = %v, want errDenied", err)
+		if _, err := s2.AddCache(ctx, "k", bytes.NewReader([]byte("x"))); !errors.Is(err, errDenied) {
+			t.Fatalf("AddCache under read-denying guard = %v, want errDenied", err)
 		}
 	})
 }
