@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
 // runServeCapture executes a `serve` command with args, capturing the resolved
@@ -44,16 +45,18 @@ func TestServeDefaults(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	want := &runtimeConfig{
-		Port:                    defaultDataPort,
-		BucketURL:               "mem://",
-		EnableMetrics:           true,
-		MetricsPath:             "/metrics",
-		LogLevel:                "info",
-		LogFormat:               "text",
-		AuthnKind:               "oidc",
-		AuthnOIDCIssuers:        []string{"https://idp.example"},
-		AuthnOIDCAudience:       "open-artifact",
-		PyPISimpleIndexCacheTTL: 60 * time.Second,
+		Port:              defaultDataPort,
+		BucketURL:         "mem://",
+		EnableMetrics:     true,
+		MetricsPath:       "/metrics",
+		LogLevel:          "info",
+		LogFormat:         "text",
+		AuthnKind:         "oidc",
+		AuthnOIDCIssuers:  []string{"https://idp.example"},
+		AuthnOIDCAudience: "open-artifact",
+		PyPI: pypi.Config{
+			SimpleIndexCacheTTL: 60 * time.Second,
+		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {
 		t.Errorf("config mismatch (-want +got):\n%s", diff)
@@ -90,11 +93,11 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 	if cfg.EnableMetrics {
 		t.Error("EnableMetrics = true, want false")
 	}
-	if cfg.PyPIMaxUploadBytes != 1024 {
-		t.Errorf("PyPIMaxUploadBytes = %d, want 1024", cfg.PyPIMaxUploadBytes)
+	if cfg.PyPI.MaxUploadBytes != 1024 {
+		t.Errorf("PyPI.MaxUploadBytes = %d, want 1024", cfg.PyPI.MaxUploadBytes)
 	}
-	if cfg.PyPISimpleIndexCacheTTL != 30*time.Second {
-		t.Errorf("PyPISimpleIndexCacheTTL = %d, want 30s in nanoseconds", cfg.PyPISimpleIndexCacheTTL)
+	if cfg.PyPI.SimpleIndexCacheTTL != 30*time.Second {
+		t.Errorf("PyPI.SimpleIndexCacheTTL = %d, want 30s in nanoseconds", cfg.PyPI.SimpleIndexCacheTTL)
 	}
 	wantIssuers := []string{"https://a.example", "https://b.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers, cmpopts.EquateEmpty()); diff != "" {
@@ -125,11 +128,11 @@ func TestServeEnvResolution(t *testing.T) {
 	if cfg.LogFormat != "json" {
 		t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
 	}
-	if cfg.PyPIMaxUploadBytes != 2048 {
-		t.Errorf("PyPIMaxUploadBytes = %d, want 2048", cfg.PyPIMaxUploadBytes)
+	if cfg.PyPI.MaxUploadBytes != 2048 {
+		t.Errorf("PyPI.MaxUploadBytes = %d, want 2048", cfg.PyPI.MaxUploadBytes)
 	}
-	if cfg.PyPISimpleIndexCacheTTL != 15*time.Second {
-		t.Errorf("PyPISimpleIndexCacheTTL = %d, want 15s in nanoseconds", cfg.PyPISimpleIndexCacheTTL)
+	if cfg.PyPI.SimpleIndexCacheTTL != 15*time.Second {
+		t.Errorf("PyPI.SimpleIndexCacheTTL = %d, want 15s in nanoseconds", cfg.PyPI.SimpleIndexCacheTTL)
 	}
 	wantIssuers := []string{"https://env.example", "https://two.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers); diff != "" {

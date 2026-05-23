@@ -2,7 +2,7 @@ package pypi
 
 import (
 	"fmt"
-	"html"
+	"html/template"
 	"mime"
 	"path"
 	"regexp"
@@ -16,6 +16,23 @@ import (
 const simpleJSONMediaType = "application/vnd.pypi.simple.v1+json"
 
 var pep503Separators = regexp.MustCompile(`[-_.]+`)
+
+var (
+	rootHTMLTemplate = template.Must(template.New("pypi-root").Parse(`<!doctype html>
+<html>
+<body>
+{{range .}}<a href="{{.Name}}/">{{.Name}}</a>
+{{end}}</body>
+</html>
+`))
+	projectHTMLTemplate = template.Must(template.New("pypi-project").Parse(`<!doctype html>
+<html>
+<body>
+{{range .Files}}<a href="{{.Href}}"{{if .RequiresPython}} data-requires-python="{{.RequiresPython}}"{{end}}>{{.Filename}}</a>
+{{end}}</body>
+</html>
+`))
+)
 
 type Project struct {
 	Name string
@@ -31,6 +48,13 @@ type FileLink struct {
 	URL            string
 	SHA256         string
 	RequiresPython string
+}
+
+func (f FileLink) Href() string {
+	if f.SHA256 == "" {
+		return f.URL
+	}
+	return f.URL + "#sha256=" + f.SHA256
 }
 
 type SimpleJSON struct {
@@ -95,33 +119,53 @@ func WantsJSON(accept string) bool {
 	if strings.TrimSpace(accept) == "" {
 		return false
 	}
-	bestJSON := -1.0
-	bestHTML := -1.0
-	for _, part := range strings.Split(accept, ",") {
+	choice, ok := parseSimpleAccept(accept)
+	if !ok {
+		return false
+	}
+	return choice.JSON > 0 && choice.JSON >= choice.HTML
+}
+
+type simpleAcceptChoice struct {
+	JSON float64
+	HTML float64
+}
+
+func parseSimpleAccept(header string) (simpleAcceptChoice, bool) {
+	choice := simpleAcceptChoice{JSON: -1, HTML: -1}
+	for _, part := range strings.Split(header, ",") {
 		mt, params, err := mime.ParseMediaType(strings.TrimSpace(part))
 		if err != nil {
-			return false
+			return simpleAcceptChoice{}, false
 		}
-		q := 1.0
-		if raw := params["q"]; raw != "" {
-			parsed, err := strconv.ParseFloat(raw, 64)
-			if err != nil || parsed < 0 || parsed > 1 {
-				return false
-			}
-			q = parsed
+		q, ok := mediaQ(params)
+		if !ok {
+			return simpleAcceptChoice{}, false
 		}
-		switch mt {
-		case simpleJSONMediaType:
-			if q > bestJSON {
-				bestJSON = q
-			}
-		case "text/html", "application/vnd.pypi.simple.v1+html":
-			if q > bestHTML {
-				bestHTML = q
-			}
+		choice.record(mt, q)
+	}
+	return choice, true
+}
+
+func mediaQ(params map[string]string) (float64, bool) {
+	if params["q"] == "" {
+		return 1, true
+	}
+	q, err := strconv.ParseFloat(params["q"], 64)
+	return q, err == nil && q >= 0 && q <= 1
+}
+
+func (c *simpleAcceptChoice) record(mediaType string, q float64) {
+	switch mediaType {
+	case simpleJSONMediaType:
+		if q > c.JSON {
+			c.JSON = q
+		}
+	case "text/html", "application/vnd.pypi.simple.v1+html":
+		if q > c.HTML {
+			c.HTML = q
 		}
 	}
-	return bestJSON > 0 && bestJSON >= bestHTML
 }
 
 func HashFromDigest(digest string) string {
@@ -134,16 +178,7 @@ func HashFromDigest(digest string) string {
 func RenderRootHTML(projects []Project) string {
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
 	var b strings.Builder
-	b.WriteString("<!doctype html>\n<html>\n<body>\n")
-	for _, p := range projects {
-		name := html.EscapeString(p.Name)
-		b.WriteString(`<a href="`)
-		b.WriteString(name)
-		b.WriteString(`/">`)
-		b.WriteString(name)
-		b.WriteString("</a>\n")
-	}
-	b.WriteString("</body>\n</html>\n")
+	_ = rootHTMLTemplate.Execute(&b, projects)
 	return b.String()
 }
 
@@ -151,25 +186,7 @@ func RenderProjectHTML(page ProjectPage) string {
 	files := append([]FileLink(nil), page.Files...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Filename < files[j].Filename })
 	var b strings.Builder
-	b.WriteString("<!doctype html>\n<html>\n<body>\n")
-	for _, f := range files {
-		href := f.URL
-		if f.SHA256 != "" {
-			href += "#sha256=" + f.SHA256
-		}
-		b.WriteString(`<a href="`)
-		b.WriteString(html.EscapeString(href))
-		b.WriteString(`"`)
-		if f.RequiresPython != "" {
-			b.WriteString(` data-requires-python="`)
-			b.WriteString(html.EscapeString(f.RequiresPython))
-			b.WriteString(`"`)
-		}
-		b.WriteString(">")
-		b.WriteString(html.EscapeString(f.Filename))
-		b.WriteString("</a>\n")
-	}
-	b.WriteString("</body>\n</html>\n")
+	_ = projectHTMLTemplate.Execute(&b, ProjectPage{Name: page.Name, Files: files})
 	return b.String()
 }
 

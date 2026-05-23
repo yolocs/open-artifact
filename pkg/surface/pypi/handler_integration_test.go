@@ -63,7 +63,7 @@ type harness struct {
 	reg    *namespace.Registry
 }
 
-func newHarness(t *testing.T, b *blob.Bucket, opts ...pypi.Option) *harness {
+func newHarness(t *testing.T, b *blob.Bucket, cfg pypi.Config) *harness {
 	t.Helper()
 	ctx := t.Context()
 	catalog, err := namespace.NewStore(b, "")
@@ -84,7 +84,7 @@ func newHarness(t *testing.T, b *blob.Bucket, opts ...pypi.Option) *harness {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	srv := httptest.NewServer(pypi.Handler(reg, auth.AlwaysAnonymous{}, opts...))
+	srv := httptest.NewServer(pypi.Handler(reg, auth.AlwaysAnonymous{}, cfg))
 	t.Cleanup(srv.Close)
 	return &harness{server: srv, reg: reg}
 }
@@ -159,7 +159,7 @@ func TestHostedUploadIndexesAndDownload(t *testing.T) {
 		be := be
 		t.Run(be.name, func(t *testing.T) {
 			t.Parallel()
-			h := newHarness(t, be.open(t), pypi.WithSimpleIndexCacheTTL(time.Minute))
+			h := newHarness(t, be.open(t), pypi.Config{SimpleIndexCacheTTL: time.Minute})
 			body := []byte("wheel bytes")
 			resp := upload(t, h, "team-a", "Foo_Bar", "1.0.0", "foo_bar-1.0.0-py3-none-any.whl", body, map[string]string{
 				"requires_python": ">=3.11",
@@ -245,7 +245,7 @@ func TestHostedUploadIndexesAndDownload(t *testing.T) {
 func TestProjectIndexCacheInvalidatesOnUpload(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, memblob.OpenBucket(nil), pypi.WithSimpleIndexCacheTTL(time.Minute))
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: time.Minute})
 	first := upload(t, h, "team-a", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", []byte("first"), nil)
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first upload status = %d: %s", first.StatusCode, readResp(t, first))
@@ -288,7 +288,7 @@ func TestProjectIndexCacheInvalidatesOnUpload(t *testing.T) {
 func TestNamespaceAuthorizationAndIsolation(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, memblob.OpenBucket(nil))
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{})
 	body := []byte("wheel")
 	cases := []struct {
 		name      string
@@ -322,7 +322,7 @@ func TestNamespaceAuthorizationAndIsolation(t *testing.T) {
 func TestConcurrentUploadsDifferentFilesSameVersion(t *testing.T) {
 	t.Parallel()
 
-	h := newHarness(t, memblob.OpenBucket(nil), pypi.WithSimpleIndexCacheTTL(0))
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: 0})
 	files := []string{
 		"demo-1.0.0-py3-none-any.whl",
 		"demo-1.0.0.tar.gz",

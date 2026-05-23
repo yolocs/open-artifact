@@ -26,7 +26,7 @@ func TestRealPipDownloadAndInstall(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)
-	h := newHarness(t, memblob.OpenBucket(nil), pypi.WithSimpleIndexCacheTTL(0))
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: 0})
 	wheel := buildWheel(t, "demo-pkg", "demo_pkg", "0.1.0")
 	resp := upload(t, h, "team-a", "demo-pkg", "0.1.0", filepath.Base(wheel), mustRead(t, wheel), nil)
 	if resp.StatusCode != 201 {
@@ -73,7 +73,7 @@ func TestRealTwineUploadSkipExisting(t *testing.T) {
 	if err := exec.Command(python, "-m", "twine", "--version").Run(); err != nil {
 		t.Skipf("python -m twine is not available: %v", err)
 	}
-	h := newHarness(t, memblob.OpenBucket(nil), pypi.WithSimpleIndexCacheTTL(0))
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: 0})
 	wheel := buildWheel(t, "twine-demo", "twine_demo", "0.1.0")
 	env := append(os.Environ(), "TWINE_NON_INTERACTIVE=1")
 	repositoryURL := h.server.URL + "/team-a/"

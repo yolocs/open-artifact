@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+
+	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
 // envPrefix is the env-var prefix for every runtime flag: a flag --foo-bar is
@@ -48,13 +50,12 @@ type runtimeConfig struct {
 
 	// Data-plane only. The authenticator is built from these by the serve
 	// wiring; format routes (#25) install the middleware.
-	RepoType                string
-	DisableAuthn            bool
-	AuthnKind               string
-	AuthnOIDCIssuers        []string
-	AuthnOIDCAudience       string
-	PyPIMaxUploadBytes      int64
-	PyPISimpleIndexCacheTTL time.Duration
+	RepoType          string
+	DisableAuthn      bool
+	AuthnKind         string
+	AuthnOIDCIssuers  []string
+	AuthnOIDCAudience string
+	PyPI              pypi.Config
 
 	// authnKindSet records whether --authn-kind was set explicitly (by flag or
 	// env) rather than left at its default, so it can be flagged as mutually
@@ -127,8 +128,8 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.AuthnKind = strings.TrimSpace(v.GetString("authn-kind"))
 		cfg.AuthnOIDCIssuers = splitCSV(v.GetStringSlice("authn-oidc-issuers"))
 		cfg.AuthnOIDCAudience = strings.TrimSpace(v.GetString("authn-oidc-audience"))
-		cfg.PyPIMaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
-		cfg.PyPISimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
+		cfg.PyPI.MaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
+		cfg.PyPI.SimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -170,11 +171,11 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		if c.RepoType != "" && !repoTypes[c.RepoType] {
 			errs = append(errs, fmt.Errorf("unsupported --repo-type %q: want pypi, npm, or maven", c.RepoType))
 		}
-		if c.PyPIMaxUploadBytes < 0 {
-			errs = append(errs, fmt.Errorf("invalid --pypi-max-upload-bytes %d: must be >= 0", c.PyPIMaxUploadBytes))
+		if c.PyPI.MaxUploadBytes < 0 {
+			errs = append(errs, fmt.Errorf("invalid --pypi-max-upload-bytes %d: must be >= 0", c.PyPI.MaxUploadBytes))
 		}
-		if c.PyPISimpleIndexCacheTTL < 0 {
-			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPISimpleIndexCacheTTL))
+		if c.PyPI.SimpleIndexCacheTTL < 0 {
+			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPI.SimpleIndexCacheTTL))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}

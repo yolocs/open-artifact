@@ -83,10 +83,7 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 		mux.Handle("/", echo.Handler(reg, authn, logger))
 	}
 	if cfg.RepoType == "pypi" {
-		mux.Handle("/", pypi.Handler(reg, authn,
-			pypi.WithMaxUploadBytes(cfg.PyPIMaxUploadBytes),
-			pypi.WithSimpleIndexCacheTTL(cfg.PyPISimpleIndexCacheTTL),
-		))
+		mux.Handle("/", pypi.Handler(reg, authn, cfg.PyPI))
 	}
 	return mux
 }

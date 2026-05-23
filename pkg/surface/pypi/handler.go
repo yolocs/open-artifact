@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/core"
 	"github.com/yolocs/open-artifact/pkg/namespace"
@@ -19,114 +21,86 @@ import (
 )
 
 const (
-	defaultSimpleIndexCacheTTL = 60 * time.Second
-	pypiFormat                 = string(core.FormatPyPI)
+	pypiFormat = string(core.FormatPyPI)
 )
 
-type Option func(*options)
-
-type options struct {
-	maxUploadBytes     int64
-	simpleIndexCacheTT time.Duration
-	now                func() time.Time
+type Config struct {
+	MaxUploadBytes      int64
+	SimpleIndexCacheTTL time.Duration
 }
 
-func WithMaxUploadBytes(n int64) Option {
-	return func(o *options) {
-		o.maxUploadBytes = n
-	}
-}
-
-func WithSimpleIndexCacheTTL(ttl time.Duration) Option {
-	return func(o *options) {
-		o.simpleIndexCacheTT = ttl
-	}
-}
-
-func Handler(reg *namespace.Registry, authn auth.Authenticator, opts ...Option) http.Handler {
-	cfg := options{simpleIndexCacheTT: defaultSimpleIndexCacheTTL, now: time.Now}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+func Handler(reg *namespace.Registry, authn auth.Authenticator, cfg Config) http.Handler {
 	h := &handler{
 		reg:   reg,
 		opts:  cfg,
-		cache: newProjectCache(cfg.simpleIndexCacheTT, cfg.now),
+		now:   time.Now,
+		cache: newProjectCache(cfg.SimpleIndexCacheTTL, time.Now),
 	}
-	return auth.Middleware(authn)(http.HandlerFunc(h.route))
+	return auth.Middleware(authn)(h.router())
 }
 
 type handler struct {
 	reg   *namespace.Registry
-	opts  options
+	opts  Config
+	now   func() time.Time
 	cache *projectCache
 }
 
-func (h *handler) route(w http.ResponseWriter, r *http.Request) {
-	ns, rest, ok := splitNamespace(r.URL.Path)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	if err := namespace.ValidateName(ns); err != nil {
-		surface.WriteNamespaceError(w, r, err, surface.NamespaceDataRead)
-		return
-	}
-
-	if rest == "" || rest == "/" {
-		switch r.Method {
-		case http.MethodPost, http.MethodPut:
-			h.upload(w, r, ns)
-		default:
-			surface.WriteMethodNotAllowed(w, []string{http.MethodPost, http.MethodPut})
-		}
-		return
-	}
-
-	switch {
-	case rest == "/simple" || rest == "/simple/":
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
-			return
-		}
-		h.rootIndex(w, r, ns)
-	case strings.HasPrefix(rest, "/simple/"):
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
-			return
-		}
-		project := strings.TrimSuffix(strings.TrimPrefix(rest, "/simple/"), "/")
-		if project == "" || strings.Contains(project, "/") {
-			http.NotFound(w, r)
-			return
-		}
-		h.projectIndex(w, r, ns, project)
-	case strings.HasPrefix(rest, "/packages/"):
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
-			return
-		}
-		parts := strings.Split(strings.TrimPrefix(rest, "/packages/"), "/")
-		if len(parts) != 3 {
-			http.NotFound(w, r)
-			return
-		}
-		h.download(w, r, ns, parts[0], parts[1], parts[2])
-	default:
-		http.NotFound(w, r)
-	}
+func (h *handler) router() http.Handler {
+	r := mux.NewRouter()
+	r.HandleFunc("/{namespace}", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
+	r.HandleFunc("/{namespace}/", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
+	r.HandleFunc("/{namespace}/simple", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/{project}", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/{project}/", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute).Methods(http.MethodGet, http.MethodHead)
+	r.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		surface.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	})
+	return r
 }
 
-func splitNamespace(path string) (string, string, bool) {
-	trimmed := strings.TrimPrefix(path, "/")
-	if trimmed == "" {
-		return "", "", false
+func (h *handler) uploadRoute(w http.ResponseWriter, r *http.Request) {
+	ns, ok := h.namespace(w, r, surface.NamespaceAdminWrite)
+	if !ok {
+		return
 	}
-	head, tail, found := strings.Cut(trimmed, "/")
-	if !found {
-		return head, "", true
+	h.upload(w, r, ns)
+}
+
+func (h *handler) rootIndexRoute(w http.ResponseWriter, r *http.Request) {
+	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
+	if !ok {
+		return
 	}
-	return head, "/" + tail, true
+	h.rootIndex(w, r, ns)
+}
+
+func (h *handler) projectIndexRoute(w http.ResponseWriter, r *http.Request) {
+	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
+	if !ok {
+		return
+	}
+	h.projectIndex(w, r, ns, mux.Vars(r)["project"])
+}
+
+func (h *handler) downloadRoute(w http.ResponseWriter, r *http.Request) {
+	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
+	if !ok {
+		return
+	}
+	vars := mux.Vars(r)
+	h.download(w, r, ns, vars["project"], vars["version"], vars["filename"])
+}
+
+func (h *handler) namespace(w http.ResponseWriter, r *http.Request, ctx surface.NamespaceErrorContext) (string, bool) {
+	ns := mux.Vars(r)["namespace"]
+	if err := namespace.ValidateName(ns); err != nil {
+		surface.WriteNamespaceError(w, r, err, ctx)
+		return "", false
+	}
+	return ns, true
 }
 
 func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
@@ -139,7 +113,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
 		return
 	}
 
-	r = surface.WithMaxBody(w, r, h.opts.maxUploadBytes)
+	r = surface.WithMaxBody(w, r, h.opts.MaxUploadBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
 			surface.WriteError(w, http.StatusRequestEntityTooLarge, "upload too large")
@@ -170,7 +144,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
 		return
 	}
 
-	annotations := uploadAnnotations(r, project, version, filename, h.opts.now().UTC())
+	annotations := uploadAnnotations(r, project, version, filename, h.now().UTC())
 	if _, err := store.AddPackage(r.Context(), project, core.WithAnnotations(map[string]any{
 		"pypi:name": project,
 	})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
