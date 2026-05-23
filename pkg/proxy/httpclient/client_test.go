@@ -196,6 +196,30 @@ func TestInjectedClientIsUsed(t *testing.T) {
 	}
 }
 
+func TestDefaultTransport(t *testing.T) {
+	t.Parallel()
+
+	c := New()
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default Transport = %T, want *http.Transport", c.http.Transport)
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 = false, want true (assume HTTP/2 over TLS)")
+	}
+	if tr.MaxIdleConnsPerHost <= 2 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want a raised pool for the single upstream host", tr.MaxIdleConnsPerHost)
+	}
+	if tr.TLSHandshakeTimeout == 0 || tr.ResponseHeaderTimeout == 0 || tr.IdleConnTimeout == 0 {
+		t.Errorf("expected non-zero transport timeouts, got TLS=%v header=%v idle=%v",
+			tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout, tr.IdleConnTimeout)
+	}
+	// No blanket client timeout — overall deadlines are the caller's via context.
+	if c.http.Timeout != 0 {
+		t.Errorf("client.Timeout = %v, want 0 (use request context)", c.http.Timeout)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

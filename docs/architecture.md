@@ -433,7 +433,11 @@ metadata blob cache lives on the `core` nouns themselves (see below).
   (`IsOK`/`IsNotFound`/`IsServerError`) so a clean upstream 404 is distinguishable
   from an unavailable or malformed upstream. An HTTP status is never an error;
   errors are reserved for transport failure, cancellation, oversize, or read
-  failure. The underlying `*http.Client` is injectable for tests. It carries no
+  failure. Its default transport assumes **HTTP/2** (negotiated over TLS via
+  ALPN) and ships sane defaults — a warm per-host idle connection pool and
+  dial/TLS/response-header/idle timeouts; there is no blanket client timeout
+  (overall deadlines come from the request context, so artifact streams aren't
+  capped). The underlying `*http.Client` is injectable for tests. It carries no
   package-format behavior.
 - **the `.cache/` cache lives on the `core` nouns as Files**, following the File
   verb pattern: `AddCache(ctx, key, body)` writes (like `AddFile`) and

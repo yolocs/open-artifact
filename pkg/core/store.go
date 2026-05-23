@@ -32,8 +32,8 @@ type Store interface {
 	// subtree directly under the Store's namespace) without performing I/O.
 	Cache(key string) CacheFile
 
-	// AddCache writes (overwriting) a format-level cache file, mirroring
-	// AddFile. Used by proxy surfaces to cache upstream index/metadata;
-	// invisible to Packages.
-	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
+	// AddCache writes a format-level cache file, mirroring AddFile but always
+	// overwriting (the cache is mutable). Used by proxy surfaces to cache
+	// upstream index/metadata; invisible to Packages.
+	AddCache(ctx context.Context, key string, body io.Reader) (CacheFile, error)
 }

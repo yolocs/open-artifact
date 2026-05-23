@@ -171,16 +171,16 @@ func (s *Store) Cache(key string) core.CacheFile {
 }
 
 // AddCache writes a format-level cache file, overwriting any existing entry.
-func (s *Store) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
-	return s.addCache(ctx, scopePrefix(s.scope), key, nil, body, opts...)
+func (s *Store) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return s.addCache(ctx, scopePrefix(s.scope), key, nil, body)
 }
 
 // addCache is the shared write path behind every level's AddCache. parentErr
 // carries the owning Package/Version's name validation (nil at the format
-// level). Filling the cache is part of serving a read (a proxy cold fill), so it
-// authorizes as a read — reader policy is sufficient. The cache is mutable, so
-// writes overwrite.
-func (s *Store) addCache(ctx context.Context, dir, key string, parentErr error, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+// level). The cache is always mutable, so the write unconditionally overwrites.
+// Filling the cache is part of serving a read (a proxy cold fill), so it
+// authorizes as a read — reader policy is sufficient.
+func (s *Store) addCache(ctx context.Context, dir, key string, parentErr error, body io.Reader) (core.CacheFile, error) {
 	f := newCacheFile(s, dir, key, parentErr)
 	if f.nameErr != nil {
 		return nil, f.nameErr
@@ -188,9 +188,7 @@ func (s *Store) addCache(ctx context.Context, dir, key string, parentErr error, 
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
-	cfg := core.NewCreateConfig(opts...)
-	cfg.AllowOverwrite = true
-	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, cfg); err != nil {
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, core.CreateConfig{AllowOverwrite: true}); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -379,8 +377,8 @@ func (p *pkg) Cache(key string) core.CacheFile {
 }
 
 // AddCache writes a package-level cache file, overwriting any existing entry.
-func (p *pkg) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
-	return p.store.addCache(ctx, packagePrefix(p.store.scope, p.name), key, p.nameErr, body, opts...)
+func (p *pkg) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return p.store.addCache(ctx, packagePrefix(p.store.scope, p.name), key, p.nameErr, body)
 }
 
 func (p *pkg) Tag(name string) core.Tag {
@@ -475,8 +473,8 @@ func (v *version) Cache(key string) core.CacheFile {
 }
 
 // AddCache writes a version-level cache file, overwriting any existing entry.
-func (v *version) AddCache(ctx context.Context, key string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
-	return v.pkg.store.addCache(ctx, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key, v.nameErr, body, opts...)
+func (v *version) AddCache(ctx context.Context, key string, body io.Reader) (core.CacheFile, error) {
+	return v.pkg.store.addCache(ctx, versionPrefix(v.pkg.store.scope, v.pkg.name, v.name), key, v.nameErr, body)
 }
 
 func (v *version) File(name string) core.File {

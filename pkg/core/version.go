@@ -45,7 +45,7 @@ type Version interface {
 	// subtree under this Version) without performing I/O.
 	Cache(key string) CacheFile
 
-	// AddCache writes (overwriting) a version-level cache file, mirroring
-	// AddFile. Invisible to Files.
-	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
+	// AddCache writes a version-level cache file, mirroring AddFile but always
+	// overwriting (the cache is mutable). Invisible to Files.
+	AddCache(ctx context.Context, key string, body io.Reader) (CacheFile, error)
 }

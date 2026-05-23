@@ -58,8 +58,8 @@ type Package interface {
 	// subtree under this Package) without performing I/O.
 	Cache(key string) CacheFile
 
-	// AddCache writes (overwriting) a package-level cache file, mirroring
-	// AddFile. Used by proxy surfaces to cache a package's upstream
-	// index/metadata; invisible to Versions/Files.
-	AddCache(ctx context.Context, key string, body io.Reader, opts ...CreateOption) (CacheFile, error)
+	// AddCache writes a package-level cache file, mirroring AddFile but always
+	// overwriting (the cache is mutable). Used by proxy surfaces to cache a
+	// package's upstream index/metadata; invisible to Versions/Files.
+	AddCache(ctx context.Context, key string, body io.Reader) (CacheFile, error)
 }

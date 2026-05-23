@@ -13,13 +13,52 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"time"
 )
 
 // DefaultMaxBodyBytes caps a buffered GET body when no override is configured.
 // Metadata documents (PyPI simple pages, npm packuments) are comfortably under
 // this; format code that streams large artifacts should set its own cap.
 const DefaultMaxBodyBytes int64 = 64 << 20 // 64 MiB
+
+// Transport defaults. Upstream registries (PyPI, npmjs.org, Maven Central) are
+// HTTPS, so HTTP/2 is negotiated over TLS via ALPN (ForceAttemptHTTP2); these
+// also bound connection reuse and the slow-upstream failure modes. Overall
+// request deadlines are the caller's job via the request context, so there is
+// deliberately no blanket http.Client.Timeout (it would also cap large artifact
+// streams).
+const (
+	defaultDialTimeout           = 10 * time.Second
+	defaultKeepAlive             = 30 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultResponseHeaderTimeout = 30 * time.Second
+	defaultIdleConnTimeout       = 90 * time.Second
+	defaultExpectContinueTimeout = 1 * time.Second
+	defaultMaxIdleConns          = 100
+	// We mostly talk to a single upstream host, so the per-host idle pool is
+	// raised well above net/http's default of 2 to keep connections warm.
+	defaultMaxIdleConnsPerHost = 100
+)
+
+// newDefaultClient builds the upstream HTTP client used when none is injected:
+// an HTTP/2-capable transport with a sane connection pool and timeouts.
+func newDefaultClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			DialContext:           (&net.Dialer{Timeout: defaultDialTimeout, KeepAlive: defaultKeepAlive}).DialContext,
+			MaxIdleConns:          defaultMaxIdleConns,
+			MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
+			IdleConnTimeout:       defaultIdleConnTimeout,
+			TLSHandshakeTimeout:   defaultTLSHandshakeTimeout,
+			ExpectContinueTimeout: defaultExpectContinueTimeout,
+			ResponseHeaderTimeout: defaultResponseHeaderTimeout,
+		},
+	}
+}
 
 // ErrOversized is returned when an upstream body exceeds the configured cap. It
 // is returned before the full body is buffered.
@@ -55,11 +94,12 @@ func WithMaxBodyBytes(n int64) Option {
 	}
 }
 
-// New constructs a Client. With no options it uses http.DefaultClient semantics
-// (its own *http.Client) and DefaultMaxBodyBytes.
+// New constructs a Client. With no options it uses an HTTP/2-capable client with
+// sane connection-pool and timeout defaults (see newDefaultClient) and
+// DefaultMaxBodyBytes. WithHTTPClient overrides the client wholesale.
 func New(opts ...Option) *Client {
 	c := &Client{
-		http:         &http.Client{},
+		http:         newDefaultClient(),
 		maxBodyBytes: DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
