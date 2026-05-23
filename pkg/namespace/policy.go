@@ -70,6 +70,7 @@ func compileMatcher(m SubjectMatcher) (compiledMatcher, error) {
 	case "":
 		kind = KindOIDC
 	case KindOIDC:
+	case KindAnonymous:
 	case KindBasicToken:
 		return compiledMatcher{}, fmt.Errorf("kind %q is reserved and not supported in v1", KindBasicToken)
 	default:

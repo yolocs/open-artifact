@@ -23,6 +23,7 @@ func TestCompilePolicyValidation(t *testing.T) {
 		{name: "explicit oidc kind", policy: Policy{Readers: []SubjectMatcher{{Kind: KindOIDC}}}},
 		{name: "empty matcher rejected", policy: Policy{Readers: []SubjectMatcher{{}}}, wantErr: true},
 		{name: "basictoken kind reserved", policy: Policy{Readers: []SubjectMatcher{{Issuer: "x", Kind: KindBasicToken}}}, wantErr: true},
+		{name: "anonymous kind accepted", policy: Policy{Readers: []SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: KindAnonymous}}}},
 		{name: "unknown kind rejected", policy: Policy{Readers: []SubjectMatcher{{Issuer: "x", Kind: "saml"}}}, wantErr: true},
 		{name: "bad sub regex rejected", policy: Policy{Readers: []SubjectMatcher{{SubMatch: "([a-z"}}}, wantErr: true},
 		{name: "bad claims regex rejected", policy: Policy{Readers: []SubjectMatcher{{ClaimsMatch: map[string]string{"k": "([a-z"}}}}, wantErr: true},
@@ -101,6 +102,25 @@ func TestPolicyAuthorize(t *testing.T) {
 				t.Fatalf("Authorize() = %v, want errors.Is %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestAnonymousPolicyAuthorize(t *testing.T) {
+	t.Parallel()
+
+	compiled, err := compilePolicy(Policy{
+		Readers: []SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: KindAnonymous}},
+		Writers: []SubjectMatcher{{Issuer: "anonymous", SubMatch: "anonymous", Kind: KindAnonymous}},
+	})
+	if err != nil {
+		t.Fatalf("compilePolicy: %v", err)
+	}
+	ac := &auth.AuthContext{Issuer: "anonymous", ID: "anonymous", Kind: "anonymous"}
+	if err := compiled.Authorize(t.Context(), ac, auth.OpRead); err != nil {
+		t.Fatalf("anonymous read = %v, want allowed", err)
+	}
+	if err := compiled.Authorize(t.Context(), ac, auth.OpWrite); err != nil {
+		t.Fatalf("anonymous write = %v, want allowed", err)
 	}
 }
 

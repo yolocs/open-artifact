@@ -52,6 +52,7 @@ type Proxy struct {
 // is reserved for a future static-token credential and is rejected in v1.
 const (
 	KindOIDC       = "oidc"
+	KindAnonymous  = "anonymous"
 	KindBasicToken = "basictoken"
 )
 
