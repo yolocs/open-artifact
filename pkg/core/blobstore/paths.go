@@ -1,8 +1,11 @@
 package blobstore
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/yolocs/open-artifact/pkg/core"
 )
 
 // Root is the constant top-level prefix under which every open-artifact
@@ -38,28 +41,47 @@ func scopePrefix(scope string) string {
 	return Root + scope + "/"
 }
 
-// encodeSegment renders any user-provided name (package, version, file, or tag)
-// as a single path-safe bucket segment. The Store — not the caller — owns this:
-// a surface may pass whatever name a client sends. It uses url.QueryEscape,
-// which escapes aggressively (every reserved or non-alphanumeric byte except
-// "-_.~"), keeping the segment broadly compatible across blob backends. Two
-// hazards in particular are handled:
+// encodeSegment renders a user-provided name (package, version, file, tag, or
+// cache key) as a single path-safe bucket segment. The Store — not the caller —
+// owns this: a surface may pass whatever name a client sends, subject to
+// validateName. It uses url.QueryEscape, which escapes aggressively (every
+// reserved or non-alphanumeric byte except "-_.~"), keeping the segment broadly
+// compatible across blob backends and turning a "/" (npm scoped names like
+// "@scope/name", Maven coordinates) into "%2F" so the name stays one bucket
+// child rather than nesting.
 //
-//   - A "/" (npm scoped names like "@scope/name", Maven coordinates) would
-//     otherwise nest into directories and break listing; QueryEscape turns it
-//     into "%2F", keeping the name one bucket child.
-//   - A leading "." would otherwise collide with the reserved dot-files
-//     (.meta/.tags/.cache) and be dropped from listings; we escape it to "%2E".
-//     QueryEscape already escapes "%" to "%25", so the encoding stays reversible
-//     and no real input can forge a "%2E"/"%2F".
-//
-// The result never contains "/" and never starts with ".".
+// A leading "." is not handled here — such names are rejected by validateName
+// before they reach storage — and a valid name (never starting with ".") never
+// QueryEscapes to a leading ".", so an encoded segment never collides with the
+// reserved .meta/.tags/.cache dot-files.
 func encodeSegment(name string) string {
-	e := url.QueryEscape(name)
-	if strings.HasPrefix(e, ".") {
-		e = "%2E" + e[1:]
+	return url.QueryEscape(name)
+}
+
+// validateName rejects a caller-provided name that is empty or begins with "."
+// A leading dot is reserved for Store-owned objects (.meta/.tags/.cache) and a
+// dot-prefixed name would be hidden from listings or collide with them, so the
+// Store refuses such input outright rather than escaping it. It returns
+// core.ErrInvalidName (wrapped) on failure.
+func validateName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: empty name", core.ErrInvalidName)
 	}
-	return e
+	if strings.HasPrefix(name, ".") {
+		return fmt.Errorf("%w: %q must not start with '.'", core.ErrInvalidName, name)
+	}
+	return nil
+}
+
+// firstErr returns the first non-nil error, or nil. It chains a handle's name
+// validation with its parent's, so a child handle reports an invalid ancestor.
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // decodeSegment reverses encodeSegment for a listed child segment. A segment

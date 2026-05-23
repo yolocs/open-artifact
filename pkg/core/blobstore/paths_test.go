@@ -1,8 +1,11 @@
 package blobstore
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/yolocs/open-artifact/pkg/core"
 )
 
 func TestPathHelpers(t *testing.T) {
@@ -63,6 +66,8 @@ func TestScopePrefixNormalization(t *testing.T) {
 func TestSegmentEncoding(t *testing.T) {
 	t.Parallel()
 
+	// Only valid names (rejected ones never reach encodeSegment) — none start
+	// with "." so none produces a dot-leading or slash-bearing segment.
 	cases := []struct {
 		name string
 		enc  string
@@ -75,12 +80,7 @@ func TestSegmentEncoding(t *testing.T) {
 		{"colon:name", "colon%3Aname"},
 		{"100%", "100%25"},
 		{"%2F", "%252F"},
-		// Leading dots are escaped so user names can never masquerade as the
-		// reserved .meta/.tags/.cache entries or be dropped from listings.
-		{".meta", "%2Emeta"},
-		{".cache", "%2Ecache"},
-		{"..", "%2E."},
-		{".hidden", "%2Ehidden"},
+		{"v1.0.0+build", "v1.0.0%2Bbuild"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,6 +99,24 @@ func TestSegmentEncoding(t *testing.T) {
 				t.Errorf("decodeSegment(%q) = %q, want %q", got, rt, tc.name)
 			}
 		})
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"requests", "@scope/name", "2.31.0", "a.b.c", "with space", "v1+build", "foo..bar"}
+	for _, name := range valid {
+		if err := validateName(name); err != nil {
+			t.Errorf("validateName(%q) = %v, want nil", name, err)
+		}
+	}
+
+	invalid := []string{"", ".", "..", ".meta", ".cache", ".tags", ".hidden"}
+	for _, name := range invalid {
+		if err := validateName(name); !errors.Is(err, core.ErrInvalidName) {
+			t.Errorf("validateName(%q) = %v, want core.ErrInvalidName", name, err)
+		}
 	}
 }
 

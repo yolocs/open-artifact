@@ -197,6 +197,49 @@ func TestCacheBlobNotListedAtItsLevel(t *testing.T) {
 	})
 }
 
+// TestDotNamesRejected proves a name starting with "." (or empty) is refused
+// outright — on reads and writes, at every level — rather than escaped, so it
+// can never be hidden from listings or collide with .meta/.tags/.cache.
+func TestDotNamesRejected(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		s, err := NewWithBucket(b, testScope)
+		if err != nil {
+			t.Fatalf("NewWithBucket: %v", err)
+		}
+
+		bad := func(what string, err error) {
+			if !errors.Is(err, core.ErrInvalidName) {
+				t.Fatalf("%s = %v, want core.ErrInvalidName", what, err)
+			}
+		}
+
+		// Writes are rejected.
+		_, err = s.AddPackage(ctx, ".cache")
+		bad("AddPackage(.cache)", err)
+		_, err = s.Package("ok").AddVersion(ctx, ".meta")
+		bad("AddVersion(.meta)", err)
+		_, err = s.Package("ok").Version("1.0.0").AddFile(ctx, ".hidden", bytes.NewReader([]byte("x")))
+		bad("AddFile(.hidden)", err)
+		bad("SetTag(.latest)", s.Package("ok").SetTag(ctx, ".latest", "1.0.0"))
+		_, err = s.AddCache(ctx, ".evil", bytes.NewReader([]byte("x")))
+		bad("AddCache(.evil)", err)
+
+		// Reads through a dot-named handle are rejected too — crucially, a
+		// ".cache" package cannot be used to enumerate the format cache.
+		_, err = s.Package(".cache").Versions(ctx)
+		bad("Package(.cache).Versions", err)
+		_, err = s.Package(".cache").Exists(ctx)
+		bad("Package(.cache).Exists", err)
+		_, err = s.Package("ok").Version(".cache").Files(ctx)
+		bad("Version(.cache).Files", err)
+		_, err = s.Cache(".meta").Read(ctx)
+		bad("Cache(.meta).Read", err)
+	})
+}
+
 // TestCacheAuthorizesAsRead proves filling the cache needs only reader policy:
 // a guard that allows reads but denies writes still permits AddCache, while a
 // guard that denies reads blocks it.

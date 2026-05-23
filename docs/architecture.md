@@ -202,19 +202,23 @@ The data-plane factory binds a `blobstore.Store` to scope `<ns>/<fmt>`; the
 blobstore path helpers lay out everything from `<package>` down. The namespace
 catalog (admin plane) owns the `<ns>/.meta` object and is its only writer.
 
-**`blobstore` owns name encoding; callers pass raw names.** Every
-user-provided name component — package, version, file, tag — is rendered into a
-single path-safe bucket segment by one helper (`encodeSegment`/`decodeSegment`,
-built on `url.QueryEscape`) and round-trips losslessly through listing.
-`QueryEscape` escapes aggressively — every reserved or non-alphanumeric byte
-except `-_.~` — so the segment stays broadly blob-backend compatible (npm scoped
-names like `@scope/name` → `%40scope%2Fname` stay one bucket child rather than
-nesting; `:` → `%3A` etc.). A leading `.` is additionally escaped to `%2E` so a
-user name can never masquerade as a reserved dot-file or be dropped from
-listings. Because `QueryEscape` already escapes `%`, the encoding is reversible
-and no real input can forge a `%2E`/`%2F`. A surface therefore does **not**
-sanitize or reject names — it forwards whatever a client sends and the Store
-keeps it safe and lossless.
+**`blobstore` owns name encoding and validation; callers pass raw names.** Every
+user-provided name component — package, version, file, tag, cache key — is
+rendered into a single path-safe bucket segment by one helper
+(`encodeSegment`/`decodeSegment`, built on `url.QueryEscape`) and round-trips
+losslessly through listing. `QueryEscape` escapes aggressively — every reserved
+or non-alphanumeric byte except `-_.~` — so the segment stays broadly
+blob-backend compatible (npm scoped names like `@scope/name` →
+`%40scope%2Fname` stay one bucket child rather than nesting; `:` → `%3A` etc.).
+A name that is empty or **begins with `.`** is **rejected** (`ErrInvalidName`),
+not escaped: a leading dot is reserved for Store-owned objects
+(`.meta`/`.tags`/`.cache`), and there is no legitimate reason to accept such
+input, so the Store refuses it rather than smuggling it through. A valid name
+never QueryEscapes to a leading `.`, so an encoded segment can never collide
+with a reserved dot-file. Validation runs on both read and write paths (a no-I/O
+handle built from a bad name carries the error and surfaces it on first use), so
+a surface does **not** sanitize names — it forwards whatever a client sends and
+the Store keeps it safe, lossless, or rejected.
 
 **No side indexes — listing is the index.** The namespace catalog is the
 top-level child listing under the root (drop dot-entries); a namespace
@@ -243,10 +247,10 @@ reserved at every directory level; listings drop dot-entries when enumerating
 real children (namespaces, formats, packages, versions, files). Namespace names
 may not begin with `.` or `_` and formats are a fixed allow-list, so
 namespace/format directories never collide with dot-prefixed metadata/cache
-objects. At the package/version/file/tag level, the `blobstore` encoding (above)
-escapes a leading `.` in user names, so user data can never be silently hidden
-or collide with `.meta`/`.tags`/`.cache` — the Store guarantees this rather than
-relying on each surface codec to reject names.
+objects. At the package/version/file/tag level, `blobstore` **rejects** a
+user name that begins with `.` (`ErrInvalidName`), so user data can never be
+silently hidden or collide with `.meta`/`.tags`/`.cache` — the Store guarantees
+this rather than relying on each surface codec to reject names.
 
 `.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
 opaque caller-owned `Annotations map[string]any` the Store round-trips but
@@ -530,8 +534,9 @@ shapes, and test layout.
    primitives). Read `Spec.Mode` per request so admin mode switches take
    effect without restart.
 3. Format codec maps the wire protocol to logical package/version/file/tag
-   names and passes them through raw — `blobstore` owns path-safe encoding, so
-   the codec does not reject or sanitize leading-dot/`..`/slash names. It maps
+   names and passes them through raw — `blobstore` owns path-safe encoding and
+   rejects empty/leading-dot names (`ErrInvalidName`), so the codec does not
+   sanitize names; it just maps that and the other
    `core`/`namespace`/`auth` sentinels to the format's HTTP error shape via the
    shared `surface` helpers.
 4. Use the shared helpers: JSON/error writers, `RedirectOrStreamFile`, HEAD
