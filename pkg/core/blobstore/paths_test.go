@@ -27,7 +27,7 @@ func TestPathHelpers(t *testing.T) {
 		{"versionMetaPath", versionMetaPath(scope, pkg, ver), "open-artifact/v1/pypi/global/requests/2.31.0/.meta"},
 		{"filePath", filePath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/" + fname},
 		{"fileMetaPath", fileMetaPath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/.meta." + fname},
-		{"cacheFilePath store", cacheFilePath(scopePrefix(scope), "simple:requests"), "open-artifact/v1/pypi/global/.cache/simple:requests"},
+		{"cacheFilePath store", cacheFilePath(scopePrefix(scope), "simple:requests"), "open-artifact/v1/pypi/global/.cache/simple%3Arequests"},
 		{"cacheFilePath package", cacheFilePath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/simple"},
 		{"cacheMetaPath", cacheMetaPath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/.meta.simple"},
 	}
@@ -69,9 +69,10 @@ func TestSegmentEncoding(t *testing.T) {
 	}{
 		{"requests", "requests"},
 		{"2.31.0", "2.31.0"},
-		{"@scope/name", "@scope%2Fname"},
+		{"@scope/name", "%40scope%2Fname"},
 		{"a/b/c", "a%2Fb%2Fc"},
-		{"with space", "with%20space"},
+		{"with space", "with+space"},
+		{"colon:name", "colon%3Aname"},
 		{"100%", "100%25"},
 		{"%2F", "%252F"},
 		// Leading dots are escaped so user names can never masquerade as the
@@ -105,7 +106,7 @@ func TestPackagePrefixEncodesScopedName(t *testing.T) {
 	t.Parallel()
 
 	got := packageMetaPath("team-a/npm", "@scope/name")
-	want := "open-artifact/v1/team-a/npm/@scope%2Fname/.meta"
+	want := "open-artifact/v1/team-a/npm/%40scope%2Fname/.meta"
 	if got != want {
 		t.Errorf("packageMetaPath = %q, want %q", got, want)
 	}

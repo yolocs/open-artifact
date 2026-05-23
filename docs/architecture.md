@@ -204,15 +204,17 @@ catalog (admin plane) owns the `<ns>/.meta` object and is its only writer.
 
 **`blobstore` owns name encoding; callers pass raw names.** Every
 user-provided name component — package, version, file, tag — is rendered into a
-single path-safe bucket segment by one helper (`encodeSegment`/`decodeSegment`)
-and round-trips losslessly through listing. It percent-escapes `/` (so npm
-scoped names like `@scope/name` → `@scope%2Fname` stay one bucket child rather
-than nesting) and escapes a leading `.` to `%2E` (so a user name can never
-masquerade as a reserved dot-file or be dropped from listings). Because
-`PathEscape` already escapes `%`, the encoding is reversible and no real input
-can forge a `%2E`/`%2F`. A surface therefore does **not** sanitize or reject
-names — it forwards whatever a client sends and the Store keeps it safe and
-lossless.
+single path-safe bucket segment by one helper (`encodeSegment`/`decodeSegment`,
+built on `url.QueryEscape`) and round-trips losslessly through listing.
+`QueryEscape` escapes aggressively — every reserved or non-alphanumeric byte
+except `-_.~` — so the segment stays broadly blob-backend compatible (npm scoped
+names like `@scope/name` → `%40scope%2Fname` stay one bucket child rather than
+nesting; `:` → `%3A` etc.). A leading `.` is additionally escaped to `%2E` so a
+user name can never masquerade as a reserved dot-file or be dropped from
+listings. Because `QueryEscape` already escapes `%`, the encoding is reversible
+and no real input can forge a `%2E`/`%2F`. A surface therefore does **not**
+sanitize or reject names — it forwards whatever a client sends and the Store
+keeps it safe and lossless.
 
 **No side indexes — listing is the index.** The namespace catalog is the
 top-level child listing under the root (drop dot-entries); a namespace

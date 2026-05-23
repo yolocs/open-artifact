@@ -40,19 +40,22 @@ func scopePrefix(scope string) string {
 
 // encodeSegment renders any user-provided name (package, version, file, or tag)
 // as a single path-safe bucket segment. The Store — not the caller — owns this:
-// a surface may pass whatever name a client sends. Two hazards are handled:
+// a surface may pass whatever name a client sends. It uses url.QueryEscape,
+// which escapes aggressively (every reserved or non-alphanumeric byte except
+// "-_.~"), keeping the segment broadly compatible across blob backends. Two
+// hazards in particular are handled:
 //
 //   - A "/" (npm scoped names like "@scope/name", Maven coordinates) would
-//     otherwise nest into directories and break listing; url.PathEscape turns
-//     it into "%2F", keeping the name one bucket child.
+//     otherwise nest into directories and break listing; QueryEscape turns it
+//     into "%2F", keeping the name one bucket child.
 //   - A leading "." would otherwise collide with the reserved dot-files
 //     (.meta/.tags/.cache) and be dropped from listings; we escape it to "%2E".
-//     PathEscape already escapes "%" to "%25", so the encoding stays reversible
+//     QueryEscape already escapes "%" to "%25", so the encoding stays reversible
 //     and no real input can forge a "%2E"/"%2F".
 //
 // The result never contains "/" and never starts with ".".
 func encodeSegment(name string) string {
-	e := url.PathEscape(name)
+	e := url.QueryEscape(name)
 	if strings.HasPrefix(e, ".") {
 		e = "%2E" + e[1:]
 	}
@@ -63,7 +66,7 @@ func encodeSegment(name string) string {
 // that fails to decode is returned unchanged so listings never silently drop
 // objects.
 func decodeSegment(seg string) string {
-	if dec, err := url.PathUnescape(seg); err == nil {
+	if dec, err := url.QueryUnescape(seg); err == nil {
 		return dec
 	}
 	return seg
