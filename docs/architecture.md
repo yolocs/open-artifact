@@ -110,8 +110,8 @@ pkg/
   command/           ← cobra/viper command tree, config resolution + validation
   bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
   serving/           ← shared HTTP server lifecycle (graceful shutdown) + logger middleware
-  core/              ← data nouns, Format enum, Store interface, Meta, sentinel errors
-    blobstore/       ← core.Store implemented over a gocloud.dev/blob bucket
+  core/              ← data nouns, Format enum, Store/Cache interfaces, Meta, sentinel errors
+    blobstore/       ← core.Store + core.Cache implemented over a gocloud.dev/blob bucket
   logging/           ← slog setup, context helpers, stable fields
   namespace/         ← Namespace/Spec model, blob-backed Store, data-plane registry/factory
   auth/              ← Authenticator/Authorizer, middleware, sentinels
@@ -121,7 +121,6 @@ pkg/
   observability/     ← liveness/readiness/metrics wrapper, request metrics + logging, format/op labeling
   proxy/             ← shared pull-through primitives (format-agnostic)
     httpclient/      ← context-aware upstream GET/HEAD with body caps + status mapping
-    cache/           ← thin keyed blob store for upstream index/metadata under <ns>/<fmt>/.cache/
     negcache/        ← in-memory negative cache for upstream 404s
     singleflight/    ← typed cold-fill coalescer
     filter/          ← allow/deny/delay config schema, validation, and decision engine
@@ -402,8 +401,10 @@ recorded with `observability.RecordError`. The query string is omitted and the
 
 ## Proxy primitives
 
-Shared, format-agnostic pull-through machinery lives under `pkg/proxy`, built so
-proxy-mode format surfaces can compose it without depending on each other:
+Shared, format-agnostic pull-through machinery, built so proxy-mode format
+surfaces can compose it without depending on each other. The HTTP client,
+negative cache, singleflight, and filters live under `pkg/proxy`; the
+metadata blob cache lives on the `core` nouns themselves (see below).
 
 - **`pkg/proxy/httpclient`** — a context-aware upstream client with context-aware
   `Get`/`Head`, a configurable buffered-body cap (oversized bodies fail with
@@ -413,13 +414,18 @@ proxy-mode format surfaces can compose it without depending on each other:
   errors are reserved for transport failure, cancellation, oversize, or read
   failure. The underlying `*http.Client` is injectable for tests. It carries no
   package-format behavior.
-- **`pkg/proxy/cache`** — a thin keyed blob store under the format-level
-  `<ns>/<fmt>/.cache/`, keyed by `sha256(logical-key)`, with `Get`/`Put`/`Delete`
-  over opaque bytes. It caches only **derived index/metadata** (a PyPI simple
-  page, an npm packument) — never artifact bytes. `Get` returns the blob plus its
-  `ModTime`; the surface owns the freshness/TTL policy and decides what to cache
-  and under what key. Everything here is opaque to `core.Store` because `.cache/`
-  is a dot-entry dropped at every listing level.
+- **the `.cache/` blob cache lives on the `core` nouns**, not in a separate
+  object: `Store.Cache()` (format level, `<ns>/<fmt>/.cache/`), `Package.Cache()`
+  (package level), and `Version.Cache()` (version level) each return a
+  `core.Cache` — a thin keyed store of opaque blobs (`Get`/`Put`/`Delete`, keyed
+  by `sha256(logical-key)`). It caches only **derived index/metadata** (a PyPI
+  simple page, an npm packument); artifact bytes are written as real
+  Packages/Versions/Files via the Store and served like hosted content. `Get`
+  returns the blob plus its `ModTime` so the surface owns freshness/TTL. Cache
+  blobs are never returned as listed entries, and the format-level cache is fully
+  invisible to `Packages` (the proxy pull-through level). Cache ops authorize as
+  **reads**, so reader policy is sufficient to populate them (the guard maps
+  cache fill to `OpRead`).
 - **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
   repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
   short default TTL (~30s). It is reconstructible and never persisted to the

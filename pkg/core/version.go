@@ -40,4 +40,8 @@ type Version interface {
 	// storage; the implementation computes the digest during upload and
 	// records it on the resulting File's Meta.
 	AddFile(ctx context.Context, name string, body io.Reader, opts ...CreateOption) (File, error)
+
+	// Cache returns the version-level opaque blob cache (the .cache/ subtree
+	// under this Version). Invisible to Files.
+	Cache() Cache
 }

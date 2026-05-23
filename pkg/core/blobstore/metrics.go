@@ -35,6 +35,7 @@ const (
 	opList        = "list"
 	opAttributes  = "attributes"
 	opSignedURL   = "signed_url"
+	opDelete      = "delete"
 )
 
 // observe records one backend call, classifying err into a stable status. It is
@@ -108,6 +109,13 @@ func (s *Store) bNewWriter(ctx context.Context, key string, opts *blob.WriterOpt
 	w, err := s.bucket.NewWriter(ctx, key, opts)
 	s.observe(opNewWriter, start, err)
 	return w, err
+}
+
+func (s *Store) bDelete(ctx context.Context, key string) error {
+	start := time.Now()
+	err := s.bucket.Delete(ctx, key)
+	s.observe(opDelete, start, err)
+	return err
 }
 
 // closeWriter times and records the writer's Close, returning its error.

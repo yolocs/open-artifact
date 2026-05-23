@@ -27,6 +27,9 @@ func TestPathHelpers(t *testing.T) {
 		{"versionMetaPath", versionMetaPath(scope, pkg, ver), "open-artifact/v1/pypi/global/requests/2.31.0/.meta"},
 		{"filePath", filePath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/" + fname},
 		{"fileMetaPath", fileMetaPath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/.meta." + fname},
+		{"storeCachePath", storeCachePath(scope, "k"), "open-artifact/v1/pypi/global/.cache/" + hashCacheKey("k")},
+		{"packageCachePath", packageCachePath(scope, pkg, "k"), "open-artifact/v1/pypi/global/requests/.cache/" + hashCacheKey("k")},
+		{"versionCachePath", versionCachePath(scope, pkg, ver, "k"), "open-artifact/v1/pypi/global/requests/2.31.0/.cache/" + hashCacheKey("k")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +98,27 @@ func TestPackagePrefixEncodesScopedName(t *testing.T) {
 	want := "open-artifact/v1/team-a/npm/@scope%2Fname/.meta"
 	if got != want {
 		t.Errorf("packageMetaPath = %q, want %q", got, want)
+	}
+}
+
+func TestHashCacheKey(t *testing.T) {
+	t.Parallel()
+
+	if a, b := hashCacheKey("simple:requests"), hashCacheKey("simple:requests"); a != b {
+		t.Errorf("hashCacheKey not stable: %q != %q", a, b)
+	}
+	if a, b := hashCacheKey("simple:requests"), hashCacheKey("packument:@scope/name"); a == b {
+		t.Errorf("distinct keys hashed identically: %q", a)
+	}
+	// A key with slashes must produce a single path-safe (hex) segment.
+	got := hashCacheKey("packument:@scope/name")
+	if strings.Contains(got, "/") {
+		t.Errorf("hashCacheKey(%q) = %q contains a path separator", "packument:@scope/name", got)
+	}
+	for _, r := range got {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			t.Errorf("hashCacheKey produced non-hex char %q in %q", r, got)
+		}
 	}
 }
 

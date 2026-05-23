@@ -50,4 +50,9 @@ type Package interface {
 	// Package (rather than Tag) because tags share a single backing
 	// object per Package.
 	SetTag(ctx context.Context, name, target string) error
+
+	// Cache returns the package-level opaque blob cache (the .cache/ subtree
+	// under this Package). Used by proxy surfaces to cache a package's upstream
+	// index/metadata; invisible to Versions/Files.
+	Cache() Cache
 }

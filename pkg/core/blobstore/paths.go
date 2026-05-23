@@ -1,6 +1,8 @@
 package blobstore
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strings"
 )
@@ -99,4 +101,29 @@ func fileMetaPath(scope, pkg, version, file string) string {
 // "."). Listings drop these when enumerating real children.
 func isDotEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
+}
+
+// hashCacheKey renders a logical cache key as a hex sha256 — a single path-safe
+// segment that dodges length limits and slashes (e.g. npm scoped keys).
+func hashCacheKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
+
+// storeCachePath returns the cache object path for a key at the Store
+// (format/scope) level: <scope>/.cache/<hash>.
+func storeCachePath(scope, key string) string {
+	return scopePrefix(scope) + cacheDir + hashCacheKey(key)
+}
+
+// packageCachePath returns the cache object path for a key at the package level:
+// <scope>/<package>/.cache/<hash>.
+func packageCachePath(scope, pkg, key string) string {
+	return packagePrefix(scope, pkg) + cacheDir + hashCacheKey(key)
+}
+
+// versionCachePath returns the cache object path for a key at the version level:
+// <scope>/<package>/<version>/.cache/<hash>.
+func versionCachePath(scope, pkg, version, key string) string {
+	return versionPrefix(scope, pkg, version) + cacheDir + hashCacheKey(key)
 }

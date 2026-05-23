@@ -24,4 +24,9 @@ type Store interface {
 	// AddPackage creates a Package in storage. Options can carry
 	// creation-time annotations via WithAnnotations.
 	AddPackage(ctx context.Context, name string, opts ...CreateOption) (Package, error)
+
+	// Cache returns the format-level opaque blob cache (the .cache/ subtree
+	// directly under the Store's namespace). Used by proxy surfaces to cache
+	// upstream index/metadata; invisible to Packages.
+	Cache() Cache
 }

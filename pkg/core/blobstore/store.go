@@ -159,6 +159,15 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	return &pkg{store: s, name: name}, nil
 }
 
+// Cache returns the format-level opaque blob cache, rooted at the .cache/
+// directory directly under the Store's scope.
+func (s *Store) Cache() core.Cache {
+	scope := s.scope
+	return &cacheStore{store: s, pathFor: func(key string) string {
+		return storeCachePath(scope, key)
+	}}
+}
+
 // listChildNames lists the immediate, non-dot children under prefix using a
 // "/" delimiter, returning their base names sorted. Dot-entries (the
 // Store-owned .meta/.tags/.cache objects) are dropped at every level — one
@@ -317,6 +326,15 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	return &version{pkg: p, name: name}, nil
 }
 
+// Cache returns the package-level opaque blob cache, rooted at the .cache/
+// directory under this Package.
+func (p *pkg) Cache() core.Cache {
+	scope, name := p.store.scope, p.name
+	return &cacheStore{store: p.store, pathFor: func(key string) string {
+		return packageCachePath(scope, name, key)
+	}}
+}
+
 func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
 
 func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
@@ -382,6 +400,15 @@ func (v *version) Annotate(ctx context.Context, annotations map[string]any) erro
 		return err
 	}
 	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
+}
+
+// Cache returns the version-level opaque blob cache, rooted at the .cache/
+// directory under this Version.
+func (v *version) Cache() core.Cache {
+	scope, pkg, ver := v.pkg.store.scope, v.pkg.name, v.name
+	return &cacheStore{store: v.pkg.store, pathFor: func(key string) string {
+		return versionCachePath(scope, pkg, ver, key)
+	}}
 }
 
 func (v *version) File(name string) core.File { return &file{version: v, name: name} }
