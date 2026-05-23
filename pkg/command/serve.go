@@ -83,7 +83,7 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 		mux.Handle("/", echo.Handler(reg, authn, logger))
 	}
 	if cfg.RepoType == "pypi" {
-		mux.Handle("/", pypi.Handler(reg, authn, cfg.PyPI))
+		mux.Handle("/", observability.WrapWithFormat("pypi", pypi.Handler(reg, authn, cfg.PyPI)))
 	}
 	return mux
 }

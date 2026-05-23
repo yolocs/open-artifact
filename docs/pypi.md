@@ -23,7 +23,8 @@ are rejected.
 ## Runtime Flags
 
 - `--pypi-max-upload-bytes` / `OPEN_ARTIFACT_PYPI_MAX_UPLOAD_BYTES`: maximum
-  multipart upload body size. `0` disables the limit.
+  multipart upload body size. The default is `104857600` bytes; `0` uses the
+  default cap.
 - `--pypi-simple-index-cache-ttl` /
   `OPEN_ARTIFACT_PYPI_SIMPLE_INDEX_CACHE_TTL`: per-process cache TTL for
   project simple indexes. The default is `60s`; `0` disables caching.

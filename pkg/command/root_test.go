@@ -55,6 +55,7 @@ func TestServeDefaults(t *testing.T) {
 		AuthnOIDCIssuers:  []string{"https://idp.example"},
 		AuthnOIDCAudience: "open-artifact",
 		PyPI: pypi.Config{
+			MaxUploadBytes:      pypi.DefaultMaxUploadBytes,
 			SimpleIndexCacheTTL: 60 * time.Second,
 		},
 	}

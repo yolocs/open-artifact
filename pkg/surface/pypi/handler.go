@@ -1,10 +1,12 @@
 package pypi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"sort"
@@ -12,11 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/mux"
-
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/core"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface"
 )
 
@@ -24,9 +25,18 @@ const (
 	pypiFormat = string(core.FormatPyPI)
 )
 
+const DefaultMaxUploadBytes int64 = 100 << 20
+
 type Config struct {
 	MaxUploadBytes      int64
 	SimpleIndexCacheTTL time.Duration
+}
+
+func (c Config) uploadLimit() int64 {
+	if c.MaxUploadBytes <= 0 {
+		return DefaultMaxUploadBytes
+	}
+	return c.MaxUploadBytes
 }
 
 func Handler(reg *namespace.Registry, authn auth.Authenticator, cfg Config) http.Handler {
@@ -47,21 +57,26 @@ type handler struct {
 }
 
 func (h *handler) router() http.Handler {
-	r := mux.NewRouter()
-	r.HandleFunc("/{namespace}", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
-	r.HandleFunc("/{namespace}/", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
-	r.HandleFunc("/{namespace}/simple", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
-	r.HandleFunc("/{namespace}/simple/", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
-	r.HandleFunc("/{namespace}/simple/{project}", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
-	r.HandleFunc("/{namespace}/simple/{project}/", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
-	r.HandleFunc("/{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute).Methods(http.MethodGet, http.MethodHead)
-	r.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		surface.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-	})
-	return r
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /{namespace}", h.uploadRoute)
+	mux.HandleFunc("PUT /{namespace}", h.uploadRoute)
+	mux.HandleFunc("POST /{namespace}/{$}", h.uploadRoute)
+	mux.HandleFunc("PUT /{namespace}/{$}", h.uploadRoute)
+	mux.HandleFunc("GET /{namespace}/simple", h.rootIndexRoute)
+	mux.HandleFunc("HEAD /{namespace}/simple", h.rootIndexRoute)
+	mux.HandleFunc("GET /{namespace}/simple/{$}", h.rootIndexRoute)
+	mux.HandleFunc("HEAD /{namespace}/simple/{$}", h.rootIndexRoute)
+	mux.HandleFunc("GET /{namespace}/simple/{project}", h.projectIndexRoute)
+	mux.HandleFunc("HEAD /{namespace}/simple/{project}", h.projectIndexRoute)
+	mux.HandleFunc("GET /{namespace}/simple/{project}/{$}", h.projectIndexRoute)
+	mux.HandleFunc("HEAD /{namespace}/simple/{project}/{$}", h.projectIndexRoute)
+	mux.HandleFunc("GET /{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute)
+	mux.HandleFunc("HEAD /{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute)
+	return mux
 }
 
 func (h *handler) uploadRoute(w http.ResponseWriter, r *http.Request) {
+	observability.SetOperation(r, "upload")
 	ns, ok := h.namespace(w, r, surface.NamespaceAdminWrite)
 	if !ok {
 		return
@@ -70,6 +85,7 @@ func (h *handler) uploadRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) rootIndexRoute(w http.ResponseWriter, r *http.Request) {
+	observability.SetOperation(r, "simple.root")
 	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
 	if !ok {
 		return
@@ -78,42 +94,40 @@ func (h *handler) rootIndexRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) projectIndexRoute(w http.ResponseWriter, r *http.Request) {
+	observability.SetOperation(r, "simple.project")
 	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
 	if !ok {
 		return
 	}
-	h.projectIndex(w, r, ns, mux.Vars(r)["project"])
+	h.projectIndex(w, r, ns, r.PathValue("project"))
 }
 
 func (h *handler) downloadRoute(w http.ResponseWriter, r *http.Request) {
+	observability.SetOperation(r, "download")
 	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
 	if !ok {
 		return
 	}
-	vars := mux.Vars(r)
-	h.download(w, r, ns, vars["project"], vars["version"], vars["filename"])
+	h.download(w, r, ns, r.PathValue("project"), r.PathValue("version"), r.PathValue("filename"))
 }
 
 func (h *handler) namespace(w http.ResponseWriter, r *http.Request, ctx surface.NamespaceErrorContext) (string, bool) {
-	ns := mux.Vars(r)["namespace"]
+	ns := r.PathValue("namespace")
 	if err := namespace.ValidateName(ns); err != nil {
 		surface.WriteNamespaceError(w, r, err, ctx)
 		return "", false
 	}
+	observability.SetNamespace(r, ns)
 	return ns, true
 }
 
 func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
-	store, err := h.authorizedStore(w, r, ns, true)
+	store, err := h.authorizedHostedStore(w, r, ns, true)
 	if err != nil {
 		return
 	}
-	if err := h.ensureHosted(r, ns); err != nil {
-		surface.WriteStoreError(w, r, err)
-		return
-	}
 
-	r = surface.WithMaxBody(w, r, h.opts.MaxUploadBytes)
+	r = surface.WithMaxBody(w, r, h.opts.uploadLimit())
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		if strings.Contains(err.Error(), "request body too large") {
 			surface.WriteError(w, http.StatusRequestEntityTooLarge, "upload too large")
@@ -122,6 +136,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
 		surface.WriteError(w, http.StatusBadRequest, "invalid multipart upload")
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	project, err := NormalizeProject(r.FormValue("name"))
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
@@ -142,6 +157,12 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, ns string) {
 	if err := ValidateFilename(filename); err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
+	}
+	if declared := strings.TrimSpace(r.FormValue("sha256_digest")); declared != "" {
+		if err := verifyDeclaredSHA256(file, declared); err != nil {
+			surface.WriteStoreError(w, r, err)
+			return
+		}
 	}
 
 	annotations := uploadAnnotations(r, project, version, filename, h.now().UTC())
@@ -181,6 +202,7 @@ func uploadAnnotations(r *http.Request, project, version, filename string, uploa
 		"metadata_version": "pypi:metadata_version",
 		"summary":          "pypi:summary",
 		"requires_python":  "pypi:requires_python",
+		"sha256_digest":    "pypi:sha256_digest",
 	} {
 		if v := r.FormValue(form); v != "" {
 			out[key] = v
@@ -189,17 +211,28 @@ func uploadAnnotations(r *http.Request, project, version, filename string, uploa
 	return out
 }
 
+func verifyDeclaredSHA256(file multipart.File, declared string) error {
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, strings.TrimSpace(declared)) {
+		return core.ErrDigestMismatch
+	}
+	return nil
+}
+
 func (h *handler) rootIndex(w http.ResponseWriter, r *http.Request, ns string) {
-	store, err := h.authorizedStore(w, r, ns, false)
+	store, err := h.authorizedHostedStore(w, r, ns, false)
 	if err != nil {
 		return
 	}
 	pkgs, err := store.Packages(r.Context())
 	if err != nil {
-		surface.WriteStoreError(w, r, err)
-		return
-	}
-	if err := h.ensureHosted(r, ns); err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
 	}
@@ -216,7 +249,7 @@ func (h *handler) projectIndex(w http.ResponseWriter, r *http.Request, ns, rawPr
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	store, err := h.authorizedStore(w, r, ns, false)
+	store, err := h.authorizedHostedStore(w, r, ns, false)
 	if err != nil {
 		return
 	}
@@ -230,10 +263,6 @@ func (h *handler) projectIndex(w http.ResponseWriter, r *http.Request, ns, rawPr
 		surface.WriteStoreError(w, r, core.ErrNotFound)
 		return
 	}
-	if err := h.ensureHosted(r, ns); err != nil {
-		surface.WriteStoreError(w, r, err)
-		return
-	}
 
 	page, err := h.cache.get(ns, project, func() (ProjectPage, error) {
 		return buildProjectPage(r, ns, project, pkg)
@@ -242,7 +271,7 @@ func (h *handler) projectIndex(w http.ResponseWriter, r *http.Request, ns, rawPr
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	if WantsJSON(r.Header.Get("Accept")) {
+	if PrefersSimpleJSON(r.Header.Get("Accept")) {
 		w.Header().Set("Content-Type", simpleJSONMediaType)
 		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusOK)
@@ -302,20 +331,16 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, ns, rawProjec
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	store, err := h.authorizedStore(w, r, ns, false)
+	store, err := h.authorizedHostedStore(w, r, ns, false)
 	if err != nil {
-		return
-	}
-	if err := h.ensureHosted(r, ns); err != nil {
-		surface.WriteStoreError(w, r, err)
 		return
 	}
 	surface.RedirectOrStreamFile(w, r, store.Package(project).Version(version).File(filename), "application/octet-stream")
 }
 
-func (h *handler) authorizedStore(w http.ResponseWriter, r *http.Request, ns string, write bool) (core.Store, error) {
+func (h *handler) authorizedHostedStore(w http.ResponseWriter, r *http.Request, ns string, write bool) (core.Store, error) {
 	ac := auth.FromContext(r.Context())
-	store, err := h.reg.Authorized(r.Context(), ns, pypiFormat, ac)
+	store, spec, err := h.reg.AuthorizedStore(r.Context(), ns, pypiFormat, ac)
 	if err != nil {
 		ctx := surface.NamespaceDataRead
 		if write {
@@ -324,22 +349,11 @@ func (h *handler) authorizedStore(w http.ResponseWriter, r *http.Request, ns str
 		surface.WriteNamespaceError(w, r, err, ctx)
 		return nil, err
 	}
-	return store, nil
-}
-
-func (h *handler) ensureHosted(r *http.Request, ns string) error {
-	scoped, err := h.reg.For(ns, pypiFormat)
-	if err != nil {
-		return err
-	}
-	spec, err := scoped.Spec(r.Context())
-	if err != nil {
-		return err
-	}
 	if spec.IsProxy() {
-		return fmt.Errorf("%w: PyPI proxy mode is not implemented", core.ErrUnsupported)
+		surface.WriteStoreError(w, r, core.ErrUnsupported)
+		return nil, core.ErrUnsupported
 	}
-	return nil
+	return store, nil
 }
 
 func (h *handler) writeHTML(w http.ResponseWriter, r *http.Request, body string) {
@@ -367,10 +381,11 @@ func annotationString(annotations map[string]any, key string) string {
 }
 
 type projectCache struct {
-	ttl time.Duration
-	now func() time.Time
-	mu  sync.Mutex
-	m   map[string]projectCacheEntry
+	ttl        time.Duration
+	now        func() time.Time
+	mu         sync.Mutex
+	generation uint64
+	m          map[string]projectCacheEntry
 }
 
 type projectCacheEntry struct {
@@ -396,6 +411,7 @@ func (c *projectCache) get(ns, project string, load func() (ProjectPage, error))
 		c.mu.Unlock()
 		return e.page, nil
 	}
+	generation := c.generation
 	c.mu.Unlock()
 
 	page, err := load()
@@ -403,7 +419,9 @@ func (c *projectCache) get(ns, project string, load func() (ProjectPage, error))
 		return ProjectPage{}, err
 	}
 	c.mu.Lock()
-	c.m[key] = projectCacheEntry{page: page, expires: c.now().Add(c.ttl)}
+	if generation == c.generation {
+		c.m[key] = projectCacheEntry{page: page, expires: c.now().Add(c.ttl)}
+	}
 	c.mu.Unlock()
 	return page, nil
 }
@@ -413,6 +431,7 @@ func (c *projectCache) invalidate(ns, project string) {
 		return
 	}
 	c.mu.Lock()
+	c.generation++
 	delete(c.m, cacheKey(ns, project))
 	c.mu.Unlock()
 }

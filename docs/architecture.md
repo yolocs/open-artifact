@@ -9,11 +9,10 @@ for how to run and configure the binary see
 
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
-logging, server lifecycle), namespaces, auth, observability, and the shared
-proxy primitives exist today; the format surfaces that wire those primitives
-into PyPI/npm/Maven proxy mode are described here as the design they are being
-built toward. Where it matters, sections note what is implemented versus
-planned.
+logging, server lifecycle), namespaces, auth, observability, PyPI hosted
+serving, and the shared proxy primitives exist today; PyPI proxy mode and the
+npm/Maven surfaces are described here as the design they are being built
+toward. Where it matters, sections note what is implemented versus planned.
 
 ## What this project is
 
@@ -126,7 +125,7 @@ pkg/
     filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     admin/           ← namespace CRUD HTTP API
-    pypi/            ← PEP 503/691 hosted + proxy (planned)
+    pypi/            ← PEP 503/691 hosted (proxy planned)
     npm/             ← npm registry hosted + proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
 docs/
@@ -480,6 +479,13 @@ index/metadata lands in `.cache/`. Cold-miss bytes flow through open-artifact
 still use backend signed-URL redirects because those target the
 operator-controlled bucket. Reader policy is sufficient to populate both the
 Store and the cache.
+
+The hosted PyPI simple-project page also has a small **process-local rendered
+HTML/JSON source cache**. It is intentionally not durable state: the bucket
+remains the source of truth, successful uploads invalidate only the affected
+project on the serving process, and each in-flight render records a generation
+so an invalidation that happens while it is loading cannot store stale output.
+Other replicas may serve an older rendered page until their TTL expires.
 
 ## gocloud.dev/blob notes
 

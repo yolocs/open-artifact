@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/yolocs/open-artifact/pkg/auth"
@@ -172,28 +171,4 @@ func RedirectOrStreamFile(w http.ResponseWriter, r *http.Request, f core.File, c
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
-}
-
-func ValidateName(name string) error {
-	decoded, err := url.PathUnescape(name)
-	if err != nil {
-		return namespace.ErrInvalidName
-	}
-	if decoded == "" || strings.HasPrefix(decoded, "/") {
-		return namespace.ErrInvalidName
-	}
-	for _, part := range strings.Split(decoded, "/") {
-		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") {
-			return namespace.ErrInvalidName
-		}
-	}
-	return nil
-}
-
-func ExtractNamespace(r *http.Request, varName string) (string, error) {
-	name := r.PathValue(varName)
-	if err := namespace.ValidateName(name); err != nil {
-		return "", err
-	}
-	return name, nil
 }

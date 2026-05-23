@@ -20,6 +20,9 @@ var pep503Separators = regexp.MustCompile(`[-_.]+`)
 var (
 	rootHTMLTemplate = template.Must(template.New("pypi-root").Parse(`<!doctype html>
 <html>
+<head>
+<meta name="pypi:repository-version" content="1.0">
+</head>
 <body>
 {{range .}}<a href="{{.Name}}/">{{.Name}}</a>
 {{end}}</body>
@@ -27,6 +30,9 @@ var (
 `))
 	projectHTMLTemplate = template.Must(template.New("pypi-project").Parse(`<!doctype html>
 <html>
+<head>
+<meta name="pypi:repository-version" content="1.0">
+</head>
 <body>
 {{range .Files}}<a href="{{.Href}}"{{if .RequiresPython}} data-requires-python="{{.RequiresPython}}"{{end}}>{{.Filename}}</a>
 {{end}}</body>
@@ -115,7 +121,7 @@ func validateSegment(s string, normalizeProject bool) error {
 	return nil
 }
 
-func WantsJSON(accept string) bool {
+func PrefersSimpleJSON(accept string) bool {
 	if strings.TrimSpace(accept) == "" {
 		return false
 	}
@@ -158,6 +164,10 @@ func mediaQ(params map[string]string) (float64, bool) {
 func (c *simpleAcceptChoice) record(mediaType string, q float64) {
 	switch mediaType {
 	case simpleJSONMediaType:
+		if q > c.JSON {
+			c.JSON = q
+		}
+	case "*/*", "application/*":
 		if q > c.JSON {
 			c.JSON = q
 		}

@@ -83,7 +83,7 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.String("authn-kind", "oidc", "authenticator kind: oidc")
 	f.StringSlice("authn-oidc-issuers", nil, "comma-separated OIDC issuer URLs")
 	f.String("authn-oidc-audience", "", "expected OIDC token audience")
-	f.Int64("pypi-max-upload-bytes", 0, "maximum PyPI multipart upload size in bytes; 0 disables the limit")
+	f.Int64("pypi-max-upload-bytes", pypi.DefaultMaxUploadBytes, "maximum PyPI multipart upload size in bytes; 0 uses the default cap")
 	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
 }
 

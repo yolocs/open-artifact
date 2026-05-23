@@ -22,7 +22,9 @@ import (
 
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/core"
+	"github.com/yolocs/open-artifact/pkg/metrics"
 	"github.com/yolocs/open-artifact/pkg/namespace"
+	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/integrationtest"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
@@ -74,6 +76,7 @@ func newHarness(t *testing.T, b *blob.Bucket, cfg pypi.Config) *harness {
 		integrationtest.HostedAnonymous("team-a"),
 		integrationtest.HostedAnonymous("team-b"),
 		integrationtest.DenyAll("team-deny"),
+		integrationtest.ProxyAnonymous("team-proxy", "https://pypi.org/simple/"),
 		integrationtest.ReadOnlyAnonymous("team-readonly"),
 	} {
 		if err := integrationtest.SeedNamespace(ctx, catalog, ns); err != nil {
@@ -88,6 +91,24 @@ func newHarness(t *testing.T, b *blob.Bucket, cfg pypi.Config) *harness {
 	t.Cleanup(srv.Close)
 	return &harness{server: srv, reg: reg}
 }
+
+type recordingMetrics struct {
+	calls []httpMetric
+}
+
+type httpMetric struct {
+	Format string
+	Op     string
+	Status string
+}
+
+func (r *recordingMetrics) HTTPRequest(format, op, status string, _ time.Duration, _, _ int64) {
+	r.calls = append(r.calls, httpMetric{Format: format, Op: op, Status: status})
+}
+func (r *recordingMetrics) BlobStoreCall(string, string, time.Duration) {}
+func (r *recordingMetrics) BlobRedirect(string)                         {}
+
+var _ metrics.Recorder = (*recordingMetrics)(nil)
 
 func upload(t *testing.T, h *harness, namespace, project, version, filename string, body []byte, fields map[string]string) *http.Response {
 	t.Helper()
@@ -242,6 +263,72 @@ func TestHostedUploadIndexesAndDownload(t *testing.T) {
 	}
 }
 
+func TestUploadRejectsMismatchedSHA256Digest(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: 0})
+	resp := upload(t, h, "team-a", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", []byte("wheel"), map[string]string{
+		"sha256_digest": "000000",
+	})
+	if got := resp.StatusCode; got != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d: %s", got, http.StatusUnprocessableEntity, readResp(t, resp))
+	}
+	_ = readResp(t, resp)
+}
+
+func TestRootIndexEmptyScopeAndProxyMode(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, memblob.OpenBucket(nil), pypi.Config{SimpleIndexCacheTTL: 0})
+	empty := get(t, h, "/team-a/simple/", "")
+	if empty.StatusCode != http.StatusOK {
+		t.Fatalf("empty root status = %d: %s", empty.StatusCode, readResp(t, empty))
+	}
+	if body := readResp(t, empty); !strings.Contains(body, `pypi:repository-version`) {
+		t.Fatalf("empty root missing repository version meta: %s", body)
+	}
+	proxy := get(t, h, "/team-proxy/simple/", "")
+	if proxy.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("proxy status = %d, want %d: %s", proxy.StatusCode, http.StatusNotImplemented, readResp(t, proxy))
+	}
+	_ = readResp(t, proxy)
+}
+
+func TestObservabilityLabelsPyPIOperations(t *testing.T) {
+	t.Parallel()
+
+	b := memblob.OpenBucket(nil)
+	t.Cleanup(func() { b.Close() })
+	h := newHarness(t, b, pypi.Config{SimpleIndexCacheTTL: 0})
+	rec := &recordingMetrics{}
+	observed := observability.Wrap(observability.Config{
+		Next:      observability.WrapWithFormat("pypi", h.server.Config.Handler),
+		Recorder:  rec,
+		Component: "test",
+	})
+	srv := httptest.NewServer(observed)
+	t.Cleanup(srv.Close)
+
+	resp := upload(t, &harness{server: srv, reg: h.reg}, "team-a", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", []byte("wheel"), nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload status = %d: %s", resp.StatusCode, readResp(t, resp))
+	}
+	_ = readResp(t, resp)
+	root := get(t, &harness{server: srv, reg: h.reg}, "/team-a/simple/", "")
+	if root.StatusCode != http.StatusOK {
+		t.Fatalf("root status = %d: %s", root.StatusCode, readResp(t, root))
+	}
+	_ = readResp(t, root)
+
+	want := []httpMetric{
+		{Format: "pypi", Op: "upload", Status: "201"},
+		{Format: "pypi", Op: "simple.root", Status: "200"},
+	}
+	if diff := cmp.Diff(want, rec.calls); diff != "" {
+		t.Fatalf("metrics mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestProjectIndexCacheInvalidatesOnUpload(t *testing.T) {
 	t.Parallel()
 
@@ -299,15 +386,21 @@ func TestNamespaceAuthorizationAndIsolation(t *testing.T) {
 		{name: "deny all namespace", namespace: "team-deny", want: http.StatusForbidden},
 		{name: "read only upload denied", namespace: "team-readonly", want: http.StatusForbidden},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := upload(t, h, tc.namespace, "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", body, nil)
-			if got := resp.StatusCode; got != tc.want {
-				t.Fatalf("status = %d, want %d: %s", got, tc.want, readResp(t, resp))
-			}
-			_ = readResp(t, resp)
-		})
-	}
+
+	t.Run("denied uploads", func(t *testing.T) {
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				resp := upload(t, h, tc.namespace, "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", body, nil)
+				if got := resp.StatusCode; got != tc.want {
+					t.Fatalf("status = %d, want %d: %s", got, tc.want, readResp(t, resp))
+				}
+				_ = readResp(t, resp)
+			})
+		}
+	})
 
 	ok := upload(t, h, "team-a", "demo", "1.0.0", "demo-1.0.0-py3-none-any.whl", body, nil)
 	if ok.StatusCode != http.StatusCreated {

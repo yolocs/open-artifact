@@ -73,7 +73,7 @@ func TestValidateVersionAndFilename(t *testing.T) {
 	}
 }
 
-func TestWantsJSON(t *testing.T) {
+func TestPrefersSimpleJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -86,14 +86,15 @@ func TestWantsJSON(t *testing.T) {
 		{name: "json beats html", accept: "text/html;q=0.2, application/vnd.pypi.simple.v1+json;q=0.8", want: true},
 		{name: "html beats json", accept: "text/html;q=0.9, application/vnd.pypi.simple.v1+json;q=0.1", want: false},
 		{name: "equal prefers json", accept: "text/html;q=0.5, application/vnd.pypi.simple.v1+json;q=0.5", want: true},
+		{name: "wildcard accepts json", accept: "*/*", want: true},
 		{name: "json q zero ignored", accept: "application/vnd.pypi.simple.v1+json;q=0", want: false},
 		{name: "unparseable defaults html", accept: "not a real accept header", want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := WantsJSON(tc.accept); got != tc.want {
-				t.Fatalf("WantsJSON(%q) = %v, want %v", tc.accept, got, tc.want)
+			if got := PrefersSimpleJSON(tc.accept); got != tc.want {
+				t.Fatalf("PrefersSimpleJSON(%q) = %v, want %v", tc.accept, got, tc.want)
 			}
 		})
 	}
@@ -127,6 +128,9 @@ func TestRenderRootHTML(t *testing.T) {
 	got := RenderRootHTML([]Project{{Name: "zeta"}, {Name: "alpha"}})
 	want := `<!doctype html>
 <html>
+<head>
+<meta name="pypi:repository-version" content="1.0">
+</head>
 <body>
 <a href="alpha/">alpha</a>
 <a href="zeta/">zeta</a>
@@ -152,6 +156,9 @@ func TestRenderProjectHTML(t *testing.T) {
 	})
 	want := `<!doctype html>
 <html>
+<head>
+<meta name="pypi:repository-version" content="1.0">
+</head>
 <body>
 <a href="/team/simple/../packages/demo/1.0.0/demo-1.0.0-py3-none-any.whl#sha256=abc123" data-requires-python="&gt;=3.11">demo-1.0.0-py3-none-any.whl</a>
 </body>
