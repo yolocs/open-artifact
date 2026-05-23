@@ -1,8 +1,6 @@
 package blobstore
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/url"
 	"strings"
 )
@@ -13,7 +11,8 @@ const Root = "open-artifact/v1/"
 
 // Dot-file names reserved at every directory level. A leading "." marks a
 // Store-owned object; listings drop dot-entries when enumerating real
-// children.
+// children. User-provided names can never collide with these because
+// encodeSegment escapes a leading dot (see below).
 const (
 	// metaName is the package- or version-level metadata envelope.
 	metaName = ".meta"
@@ -23,7 +22,8 @@ const (
 	// separate object .tags/<tag> whose content is the target version, so a
 	// SetTag is a single independent write — no shared file to read-modify-write.
 	tagsName = ".tags"
-	// cacheDir is the package-scoped cache directory (opaque to the Store).
+	// cacheDir is the per-level cache directory (opaque to the listing verbs).
+	// Cache files live directly under it.
 	cacheDir = ".cache/"
 )
 
@@ -38,18 +38,31 @@ func scopePrefix(scope string) string {
 	return Root + scope + "/"
 }
 
-// encodePkgName renders a logical package name as a single path-safe segment.
-// npm scoped names like "@scope/name" carry a "/" that would otherwise nest
-// into directories and break listing; percent-encoding it (via url.PathEscape)
-// keeps the package one bucket child while staying lossless.
-func encodePkgName(name string) string {
-	return url.PathEscape(name)
+// encodeSegment renders any user-provided name (package, version, file, or tag)
+// as a single path-safe bucket segment. The Store — not the caller — owns this:
+// a surface may pass whatever name a client sends. Two hazards are handled:
+//
+//   - A "/" (npm scoped names like "@scope/name", Maven coordinates) would
+//     otherwise nest into directories and break listing; url.PathEscape turns
+//     it into "%2F", keeping the name one bucket child.
+//   - A leading "." would otherwise collide with the reserved dot-files
+//     (.meta/.tags/.cache) and be dropped from listings; we escape it to "%2E".
+//     PathEscape already escapes "%" to "%25", so the encoding stays reversible
+//     and no real input can forge a "%2E"/"%2F".
+//
+// The result never contains "/" and never starts with ".".
+func encodeSegment(name string) string {
+	e := url.PathEscape(name)
+	if strings.HasPrefix(e, ".") {
+		e = "%2E" + e[1:]
+	}
+	return e
 }
 
-// decodePkgName reverses encodePkgName for a listed child segment. A segment
+// decodeSegment reverses encodeSegment for a listed child segment. A segment
 // that fails to decode is returned unchanged so listings never silently drop
 // objects.
-func decodePkgName(seg string) string {
+func decodeSegment(seg string) string {
 	if dec, err := url.PathUnescape(seg); err == nil {
 		return dec
 	}
@@ -58,7 +71,7 @@ func decodePkgName(seg string) string {
 
 // packagePrefix returns the directory prefix for a package.
 func packagePrefix(scope, pkg string) string {
-	return scopePrefix(scope) + encodePkgName(pkg) + "/"
+	return scopePrefix(scope) + encodeSegment(pkg) + "/"
 }
 
 // packageMetaPath returns the path of a package's .meta object.
@@ -74,12 +87,12 @@ func packageTagsPrefix(scope, pkg string) string {
 // tagPath returns the path of a single dist-tag object, whose content is the
 // target version string.
 func tagPath(scope, pkg, tag string) string {
-	return packageTagsPrefix(scope, pkg) + tag
+	return packageTagsPrefix(scope, pkg) + encodeSegment(tag)
 }
 
 // versionPrefix returns the directory prefix for a version.
 func versionPrefix(scope, pkg, version string) string {
-	return packagePrefix(scope, pkg) + version + "/"
+	return packagePrefix(scope, pkg) + encodeSegment(version) + "/"
 }
 
 // versionMetaPath returns the path of a version's .meta object.
@@ -89,41 +102,27 @@ func versionMetaPath(scope, pkg, version string) string {
 
 // filePath returns the path of a file's blob.
 func filePath(scope, pkg, version, file string) string {
-	return versionPrefix(scope, pkg, version) + file
+	return versionPrefix(scope, pkg, version) + encodeSegment(file)
 }
 
 // fileMetaPath returns the path of a file's .meta.<file> sidecar.
 func fileMetaPath(scope, pkg, version, file string) string {
-	return versionPrefix(scope, pkg, version) + metaFilePrefix + file
+	return versionPrefix(scope, pkg, version) + metaFilePrefix + encodeSegment(file)
+}
+
+// cacheFilePath returns the path of a cache file's blob: <dir>.cache/<name>.
+// dir is a level prefix ending in "/" (scope, package, or version prefix).
+func cacheFilePath(dir, name string) string {
+	return dir + cacheDir + encodeSegment(name)
+}
+
+// cacheMetaPath returns the path of a cache file's .meta.<name> sidecar.
+func cacheMetaPath(dir, name string) string {
+	return dir + cacheDir + metaFilePrefix + encodeSegment(name)
 }
 
 // isDotEntry reports whether a listing entry name is Store-owned (leading
 // "."). Listings drop these when enumerating real children.
 func isDotEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
-}
-
-// hashCacheKey renders a logical cache key as a hex sha256 — a single path-safe
-// segment that dodges length limits and slashes (e.g. npm scoped keys).
-func hashCacheKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
-}
-
-// storeCachePath returns the cache object path for a key at the Store
-// (format/scope) level: <scope>/.cache/<hash>.
-func storeCachePath(scope, key string) string {
-	return scopePrefix(scope) + cacheDir + hashCacheKey(key)
-}
-
-// packageCachePath returns the cache object path for a key at the package level:
-// <scope>/<package>/.cache/<hash>.
-func packageCachePath(scope, pkg, key string) string {
-	return packagePrefix(scope, pkg) + cacheDir + hashCacheKey(key)
-}
-
-// versionCachePath returns the cache object path for a key at the version level:
-// <scope>/<package>/<version>/.cache/<hash>.
-func versionCachePath(scope, pkg, version, key string) string {
-	return versionPrefix(scope, pkg, version) + cacheDir + hashCacheKey(key)
 }

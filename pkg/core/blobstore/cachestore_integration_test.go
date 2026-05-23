@@ -3,12 +3,28 @@
 package blobstore
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"testing"
 
 	"gocloud.dev/blob"
+
+	"github.com/yolocs/open-artifact/pkg/core"
 )
 
+func readAll(t *testing.T, rc io.ReadCloser) string {
+	t.Helper()
+	defer rc.Close()
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return string(b)
+}
+
+// TestCacheRoundTrip exercises the cache as a File: Put streams a blob, File
+// reads it back (digest-verified) with metadata, and Delete removes it.
 func TestCacheRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -18,38 +34,57 @@ func TestCacheRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-
-		c := s.Cache()
+		c := s.Package("requests").Cache()
+		const key = "simple"
 		body := []byte("<html>requests</html>")
-		if err := c.Put(ctx, "simple:requests", body); err != nil {
+
+		cf, err := c.Put(ctx, key, bytes.NewReader(body))
+		if err != nil {
 			t.Fatalf("Put = %v", err)
 		}
-		got, found, err := c.Get(ctx, "simple:requests")
-		if err != nil || !found {
-			t.Fatalf("Get = (_, %v, %v), want found", found, err)
-		}
-		if string(got.Body) != string(body) {
-			t.Fatalf("body = %q, want %q", got.Body, body)
-		}
-		if got.ModTime.IsZero() {
-			t.Fatalf("ModTime is zero; surfaces need it for freshness")
+		if cf.Name() != key {
+			t.Fatalf("Name = %q, want %q", cf.Name(), key)
 		}
 
-		// Overwrite, then delete.
-		if err := c.Put(ctx, "simple:requests", []byte("v2")); err != nil {
+		got := c.File(key)
+		if ok, err := got.Exists(ctx); err != nil || !ok {
+			t.Fatalf("Exists = (%v, %v), want true", ok, err)
+		}
+		rc, err := got.Read(ctx)
+		if err != nil {
+			t.Fatalf("Read = %v", err)
+		}
+		if data := readAll(t, rc); data != string(body) {
+			t.Fatalf("Read = %q, want %q", data, body)
+		}
+		meta, err := got.Meta(ctx)
+		if err != nil {
+			t.Fatalf("Meta = %v", err)
+		}
+		if meta.Digest == "" || meta.UpdatedAt.IsZero() {
+			t.Fatalf("Meta missing digest/timestamp: %+v", meta)
+		}
+
+		// Cache is mutable: a second Put overwrites without ErrAlreadyExists.
+		if _, err := c.Put(ctx, key, bytes.NewReader([]byte("v2"))); err != nil {
 			t.Fatalf("Put overwrite = %v", err)
 		}
-		if got, _, _ := c.Get(ctx, "simple:requests"); string(got.Body) != "v2" {
-			t.Fatalf("after overwrite body = %q, want v2", got.Body)
+		rc2, err := c.File(key).Read(ctx)
+		if err != nil {
+			t.Fatalf("Read after overwrite = %v", err)
 		}
-		if err := c.Delete(ctx, "simple:requests"); err != nil {
+		if data := readAll(t, rc2); data != "v2" {
+			t.Fatalf("after overwrite Read = %q, want v2", data)
+		}
+
+		if err := c.Delete(ctx, key); err != nil {
 			t.Fatalf("Delete = %v", err)
 		}
-		if _, found, _ := c.Get(ctx, "simple:requests"); found {
-			t.Fatalf("Get after Delete found = true")
+		if ok, err := c.File(key).Exists(ctx); err != nil || ok {
+			t.Fatalf("Exists after Delete = (%v, %v), want false", ok, err)
 		}
 		// Deleting an absent entry is not an error.
-		if err := c.Delete(ctx, "simple:requests"); err != nil {
+		if err := c.Delete(ctx, key); err != nil {
 			t.Fatalf("Delete absent = %v, want nil", err)
 		}
 	})
@@ -70,27 +105,27 @@ func TestCacheLevelsIsolated(t *testing.T) {
 		ver := pkg.Version("2.31.0")
 
 		const key = "index"
-		if err := s.Cache().Put(ctx, key, []byte("store")); err != nil {
-			t.Fatalf("store Put = %v", err)
+		put := func(c core.Cache, body string) {
+			if _, err := c.Put(ctx, key, bytes.NewReader([]byte(body))); err != nil {
+				t.Fatalf("Put = %v", err)
+			}
 		}
-		if err := pkg.Cache().Put(ctx, key, []byte("package")); err != nil {
-			t.Fatalf("package Put = %v", err)
-		}
-		if err := ver.Cache().Put(ctx, key, []byte("version")); err != nil {
-			t.Fatalf("version Put = %v", err)
-		}
+		put(s.Cache(), "store")
+		put(pkg.Cache(), "package")
+		put(ver.Cache(), "version")
 
-		assert := func(name string, got []byte, want string) {
-			if string(got) != want {
+		check := func(name string, c core.Cache, want string) {
+			rc, err := c.File(key).Read(ctx)
+			if err != nil {
+				t.Fatalf("%s Read = %v", name, err)
+			}
+			if got := readAll(t, rc); got != want {
 				t.Fatalf("%s cache = %q, want %q", name, got, want)
 			}
 		}
-		sg, _, _ := s.Cache().Get(ctx, key)
-		pg, _, _ := pkg.Cache().Get(ctx, key)
-		vg, _, _ := ver.Cache().Get(ctx, key)
-		assert("store", sg.Body, "store")
-		assert("package", pg.Body, "package")
-		assert("version", vg.Body, "version")
+		check("store", s.Cache(), "store")
+		check("package", pkg.Cache(), "package")
+		check("version", ver.Cache(), "version")
 	})
 }
 
@@ -107,7 +142,7 @@ func TestFormatCacheInvisibleToPackages(t *testing.T) {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
 
-		if err := s.Cache().Put(ctx, "root-index", []byte("x")); err != nil {
+		if _, err := s.Cache().Put(ctx, "root-index", bytes.NewReader([]byte("x"))); err != nil {
 			t.Fatalf("store Put = %v", err)
 		}
 		if pkgs, err := s.Packages(ctx); err != nil || len(pkgs) != 0 {
@@ -143,7 +178,7 @@ func TestCacheBlobNotListedAtItsLevel(t *testing.T) {
 		}
 
 		pkg := s.Package("requests")
-		if err := pkg.Cache().Put(ctx, "simple", []byte("x")); err != nil {
+		if _, err := pkg.Cache().Put(ctx, "simple", bytes.NewReader([]byte("x"))); err != nil {
 			t.Fatalf("package Put = %v", err)
 		}
 		if vers, err := pkg.Versions(ctx); err != nil || len(vers) != 0 {
@@ -151,7 +186,7 @@ func TestCacheBlobNotListedAtItsLevel(t *testing.T) {
 		}
 
 		ver := pkg.Version("2.31.0")
-		if err := ver.Cache().Put(ctx, "meta", []byte("x")); err != nil {
+		if _, err := ver.Cache().Put(ctx, "meta", bytes.NewReader([]byte("x"))); err != nil {
 			t.Fatalf("version Put = %v", err)
 		}
 		if files, err := ver.Files(ctx); err != nil || len(files) != 0 {
@@ -169,29 +204,27 @@ func TestCacheAuthorizesAsRead(t *testing.T) {
 	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
 		ctx := t.Context()
 
-		// Reader allowed, writer denied: cache fill must still succeed.
 		readOnly := &recordingGuard{denyWrite: true}
 		s, err := NewWithBucket(b, testScope, WithGuard(readOnly.guard))
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-		if err := s.Cache().Put(ctx, "k", []byte("x")); err != nil {
+		if _, err := s.Cache().Put(ctx, "k", bytes.NewReader([]byte("x"))); err != nil {
 			t.Fatalf("Cache.Put under read-only guard = %v, want allowed (reader fills cache)", err)
 		}
-		if _, _, err := s.Cache().Get(ctx, "k"); err != nil {
-			t.Fatalf("Cache.Get under read-only guard = %v, want allowed", err)
+		if _, err := s.Cache().File("k").Read(ctx); err != nil {
+			t.Fatalf("Cache read under read-only guard = %v, want allowed", err)
 		}
 		if readOnly.writes != 0 {
 			t.Fatalf("cache ops consulted the guard as writes (%d); want reads only", readOnly.writes)
 		}
 
-		// Reader denied: cache fill must be rejected.
 		noRead := &recordingGuard{denyRead: true}
 		s2, err := NewWithBucket(b, testScope, WithGuard(noRead.guard))
 		if err != nil {
 			t.Fatalf("NewWithBucket: %v", err)
 		}
-		if err := s2.Cache().Put(ctx, "k", []byte("x")); !errors.Is(err, errDenied) {
+		if _, err := s2.Cache().Put(ctx, "k", bytes.NewReader([]byte("x"))); !errors.Is(err, errDenied) {
 			t.Fatalf("Cache.Put under read-denying guard = %v, want errDenied", err)
 		}
 	})

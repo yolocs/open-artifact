@@ -27,9 +27,9 @@ func TestPathHelpers(t *testing.T) {
 		{"versionMetaPath", versionMetaPath(scope, pkg, ver), "open-artifact/v1/pypi/global/requests/2.31.0/.meta"},
 		{"filePath", filePath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/" + fname},
 		{"fileMetaPath", fileMetaPath(scope, pkg, ver, fname), "open-artifact/v1/pypi/global/requests/2.31.0/.meta." + fname},
-		{"storeCachePath", storeCachePath(scope, "k"), "open-artifact/v1/pypi/global/.cache/" + hashCacheKey("k")},
-		{"packageCachePath", packageCachePath(scope, pkg, "k"), "open-artifact/v1/pypi/global/requests/.cache/" + hashCacheKey("k")},
-		{"versionCachePath", versionCachePath(scope, pkg, ver, "k"), "open-artifact/v1/pypi/global/requests/2.31.0/.cache/" + hashCacheKey("k")},
+		{"cacheFilePath store", cacheFilePath(scopePrefix(scope), "simple:requests"), "open-artifact/v1/pypi/global/.cache/simple:requests"},
+		{"cacheFilePath package", cacheFilePath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/simple"},
+		{"cacheMetaPath", cacheMetaPath(packagePrefix(scope, pkg), "simple"), "open-artifact/v1/pypi/global/requests/.cache/.meta.simple"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,7 +60,7 @@ func TestScopePrefixNormalization(t *testing.T) {
 	}
 }
 
-func TestPackageNameEncoding(t *testing.T) {
+func TestSegmentEncoding(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -68,24 +68,34 @@ func TestPackageNameEncoding(t *testing.T) {
 		enc  string
 	}{
 		{"requests", "requests"},
+		{"2.31.0", "2.31.0"},
 		{"@scope/name", "@scope%2Fname"},
 		{"a/b/c", "a%2Fb%2Fc"},
 		{"with space", "with%20space"},
 		{"100%", "100%25"},
 		{"%2F", "%252F"},
+		// Leading dots are escaped so user names can never masquerade as the
+		// reserved .meta/.tags/.cache entries or be dropped from listings.
+		{".meta", "%2Emeta"},
+		{".cache", "%2Ecache"},
+		{"..", "%2E."},
+		{".hidden", "%2Ehidden"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := encodePkgName(tc.name)
+			got := encodeSegment(tc.name)
 			if got != tc.enc {
-				t.Errorf("encodePkgName(%q) = %q, want %q", tc.name, got, tc.enc)
+				t.Errorf("encodeSegment(%q) = %q, want %q", tc.name, got, tc.enc)
 			}
 			if strings.Contains(got, "/") {
-				t.Errorf("encodePkgName(%q) = %q contains a path separator", tc.name, got)
+				t.Errorf("encodeSegment(%q) = %q contains a path separator", tc.name, got)
 			}
-			if rt := decodePkgName(got); rt != tc.name {
-				t.Errorf("decodePkgName(%q) = %q, want %q", got, rt, tc.name)
+			if strings.HasPrefix(got, ".") {
+				t.Errorf("encodeSegment(%q) = %q starts with a dot", tc.name, got)
+			}
+			if rt := decodeSegment(got); rt != tc.name {
+				t.Errorf("decodeSegment(%q) = %q, want %q", got, rt, tc.name)
 			}
 		})
 	}
@@ -98,27 +108,6 @@ func TestPackagePrefixEncodesScopedName(t *testing.T) {
 	want := "open-artifact/v1/team-a/npm/@scope%2Fname/.meta"
 	if got != want {
 		t.Errorf("packageMetaPath = %q, want %q", got, want)
-	}
-}
-
-func TestHashCacheKey(t *testing.T) {
-	t.Parallel()
-
-	if a, b := hashCacheKey("simple:requests"), hashCacheKey("simple:requests"); a != b {
-		t.Errorf("hashCacheKey not stable: %q != %q", a, b)
-	}
-	if a, b := hashCacheKey("simple:requests"), hashCacheKey("packument:@scope/name"); a == b {
-		t.Errorf("distinct keys hashed identically: %q", a)
-	}
-	// A key with slashes must produce a single path-safe (hex) segment.
-	got := hashCacheKey("packument:@scope/name")
-	if strings.Contains(got, "/") {
-		t.Errorf("hashCacheKey(%q) = %q contains a path separator", "packument:@scope/name", got)
-	}
-	for _, r := range got {
-		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
-			t.Errorf("hashCacheKey produced non-hex char %q in %q", r, got)
-		}
 	}
 }
 

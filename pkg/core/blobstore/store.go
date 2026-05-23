@@ -129,7 +129,7 @@ func (s *Store) Packages(ctx context.Context) ([]core.Package, error) {
 	}
 	out := make([]core.Package, 0, len(names))
 	for _, n := range names {
-		out = append(out, &pkg{store: s, name: decodePkgName(n)})
+		out = append(out, &pkg{store: s, name: decodeSegment(n)})
 	}
 	return out, nil
 }
@@ -159,13 +159,10 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	return &pkg{store: s, name: name}, nil
 }
 
-// Cache returns the format-level opaque blob cache, rooted at the .cache/
-// directory directly under the Store's scope.
+// Cache returns the format-level cache, rooted at the .cache/ directory
+// directly under the Store's scope.
 func (s *Store) Cache() core.Cache {
-	scope := s.scope
-	return &cacheStore{store: s, pathFor: func(key string) string {
-		return storeCachePath(scope, key)
-	}}
+	return &cacheHandle{store: s, dir: scopePrefix(s.scope)}
 }
 
 // listChildNames lists the immediate, non-dot children under prefix using a
@@ -297,7 +294,7 @@ func (p *pkg) Versions(ctx context.Context) ([]core.Version, error) {
 	}
 	out := make([]core.Version, 0, len(names))
 	for _, n := range names {
-		out = append(out, &version{pkg: p, name: n})
+		out = append(out, &version{pkg: p, name: decodeSegment(n)})
 	}
 	return out, nil
 }
@@ -326,13 +323,10 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	return &version{pkg: p, name: name}, nil
 }
 
-// Cache returns the package-level opaque blob cache, rooted at the .cache/
-// directory under this Package.
+// Cache returns the package-level cache, rooted at the .cache/ directory under
+// this Package.
 func (p *pkg) Cache() core.Cache {
-	scope, name := p.store.scope, p.name
-	return &cacheStore{store: p.store, pathFor: func(key string) string {
-		return packageCachePath(scope, name, key)
-	}}
+	return &cacheHandle{store: p.store, dir: packagePrefix(p.store.scope, p.name)}
 }
 
 func (p *pkg) Tag(name string) core.Tag { return &tag{pkg: p, name: name} }
@@ -348,7 +342,7 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	}
 	out := make([]core.Tag, 0, len(names))
 	for _, n := range names {
-		out = append(out, &tag{pkg: p, name: n})
+		out = append(out, &tag{pkg: p, name: decodeSegment(n)})
 	}
 	return out, nil
 }
@@ -402,16 +396,13 @@ func (v *version) Annotate(ctx context.Context, annotations map[string]any) erro
 	return s.upsertAnnotations(ctx, versionMetaPath(s.scope, v.pkg.name, v.name), annotations)
 }
 
-// Cache returns the version-level opaque blob cache, rooted at the .cache/
-// directory under this Version.
+// Cache returns the version-level cache, rooted at the .cache/ directory under
+// this Version.
 func (v *version) Cache() core.Cache {
-	scope, pkg, ver := v.pkg.store.scope, v.pkg.name, v.name
-	return &cacheStore{store: v.pkg.store, pathFor: func(key string) string {
-		return versionCachePath(scope, pkg, ver, key)
-	}}
+	return &cacheHandle{store: v.pkg.store, dir: versionPrefix(v.pkg.store.scope, v.pkg.name, v.name)}
 }
 
-func (v *version) File(name string) core.File { return &file{version: v, name: name} }
+func (v *version) File(name string) core.File { return newFile(v, name) }
 
 func (v *version) Files(ctx context.Context) ([]core.File, error) {
 	s := v.pkg.store
@@ -424,7 +415,7 @@ func (v *version) Files(ctx context.Context) ([]core.File, error) {
 	}
 	out := make([]core.File, 0, len(names))
 	for _, n := range names {
-		out = append(out, &file{version: v, name: n})
+		out = append(out, newFile(v, decodeSegment(n)))
 	}
 	return out, nil
 }
@@ -438,32 +429,42 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 	if err := s.authorize(ctx, true); err != nil {
 		return nil, err
 	}
-	cfg := core.NewCreateConfig(opts...)
-	blobPath := filePath(s.scope, v.pkg.name, v.name, name)
+	f := newFile(v, name)
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, core.NewCreateConfig(opts...)); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
 
+// writeFile streams body to blobKey while computing a rolling SHA256, then
+// writes the .meta sidecar at metaKey carrying the digest and timestamps. With
+// AllowOverwrite=false a pre-existing blob yields ErrAlreadyExists. It is the
+// shared write path behind AddFile and Cache.Put; it does not authorize —
+// callers do, mapping the operation to read or write as appropriate.
+func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.Reader, cfg core.CreateConfig) (core.Meta, error) {
 	if !cfg.AllowOverwrite {
-		exists, err := s.bExists(ctx, blobPath)
+		exists, err := s.bExists(ctx, blobKey)
 		if err != nil {
-			return nil, fmt.Errorf("blobstore: probe %q: %w", blobPath, mapErr(err))
+			return core.Meta{}, fmt.Errorf("blobstore: probe %q: %w", blobKey, mapErr(err))
 		}
 		if exists {
-			return nil, core.ErrAlreadyExists
+			return core.Meta{}, core.ErrAlreadyExists
 		}
 	}
 
-	w, err := s.bNewWriter(ctx, blobPath, nil)
+	w, err := s.bNewWriter(ctx, blobKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("blobstore: open writer %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: open writer %q: %w", blobKey, mapErr(err))
 	}
 
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
 		// Abort the in-flight write so no partial blob is committed.
 		_ = s.closeWriter(w)
-		return nil, fmt.Errorf("blobstore: stream %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: stream %q: %w", blobKey, mapErr(err))
 	}
 	if err := s.closeWriter(w); err != nil {
-		return nil, fmt.Errorf("blobstore: commit %q: %w", blobPath, mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapErr(err))
 	}
 
 	now := s.now().UTC()
@@ -473,42 +474,72 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 		UpdatedAt:   now,
 		Annotations: cfg.Annotations,
 	}
-	if err := s.writeMeta(ctx, fileMetaPath(s.scope, v.pkg.name, v.name, name), meta); err != nil {
-		// The blob is committed and reachable; the digest is recomputed
-		// lazily on read if the sidecar is absent. Surface the error so the
-		// caller knows the sidecar did not land.
-		return nil, fmt.Errorf("blobstore: write sidecar for %q: %w", blobPath, err)
+	if err := s.writeMeta(ctx, metaKey, meta); err != nil {
+		// The blob is committed and reachable; the digest is recomputed lazily
+		// on read if the sidecar is absent. Surface the error so the caller
+		// knows the sidecar did not land.
+		return core.Meta{}, fmt.Errorf("blobstore: write sidecar %q: %w", metaKey, err)
 	}
-
-	return &file{version: v, name: name}, nil
+	return meta, nil
 }
 
-// file is the blobstore implementation of core.File.
+// file is the blobstore implementation of core.File. It is path-based: blobKey
+// and metaKey are computed once at construction, so the same type backs both a
+// Version's files and a Cache's files (which have no Version parent). version is
+// nil for cache files.
 type file struct {
-	version *version
+	store   *Store
 	name    string
+	blobKey string
+	metaKey string
+	version *version
 }
 
-func (f *file) Name() string          { return f.name }
-func (f *file) Namespace() string     { return f.version.pkg.store.scope }
-func (f *file) Version() core.Version { return f.version }
-func (f *file) Package() core.Package { return f.version.pkg }
-
-func (f *file) store() *Store { return f.version.pkg.store }
-func (f *file) blobPath() string {
-	return filePath(f.store().scope, f.version.pkg.name, f.version.name, f.name)
+// newFile builds a handle to a Version's file.
+func newFile(v *version, name string) *file {
+	s := v.pkg.store
+	return &file{
+		store:   s,
+		name:    name,
+		blobKey: filePath(s.scope, v.pkg.name, v.name, name),
+		metaKey: fileMetaPath(s.scope, v.pkg.name, v.name, name),
+		version: v,
+	}
 }
-func (f *file) metaPath() string {
-	return fileMetaPath(f.store().scope, f.version.pkg.name, f.version.name, f.name)
+
+// newCacheFile builds a handle to a cache file under the .cache/ folder of the
+// level whose prefix is dir.
+func newCacheFile(s *Store, dir, name string) *file {
+	return &file{
+		store:   s,
+		name:    name,
+		blobKey: cacheFilePath(dir, name),
+		metaKey: cacheMetaPath(dir, name),
+	}
+}
+
+func (f *file) Name() string      { return f.name }
+func (f *file) Namespace() string { return f.store.scope }
+func (f *file) Version() core.Version {
+	if f.version == nil {
+		return nil
+	}
+	return f.version
+}
+func (f *file) Package() core.Package {
+	if f.version == nil {
+		return nil
+	}
+	return f.version.pkg
 }
 
 func (f *file) Exists(ctx context.Context) (bool, error) {
-	if err := f.store().authorize(ctx, false); err != nil {
+	if err := f.store.authorize(ctx, false); err != nil {
 		return false, err
 	}
-	exists, err := f.store().bExists(ctx, f.blobPath())
+	exists, err := f.store.bExists(ctx, f.blobKey)
 	if err != nil {
-		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobPath(), mapErr(err))
+		return false, fmt.Errorf("blobstore: stat %q: %w", f.blobKey, mapErr(err))
 	}
 	return exists, nil
 }
@@ -517,18 +548,18 @@ func (f *file) Exists(ctx context.Context) (bool, error) {
 // sidecar is absent or corrupted it recomputes the digest by streaming the
 // blob and derives timestamps from the bucket attributes.
 func (f *file) Meta(ctx context.Context) (core.Meta, error) {
-	s := f.store()
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return core.Meta{}, err
 	}
-	raw, err := s.bReadAll(ctx, f.metaPath())
+	raw, err := s.bReadAll(ctx, f.metaKey)
 	if err == nil {
 		if m, derr := decodeMeta(raw); derr == nil {
 			return m, nil
 		}
 		// Corrupted sidecar: fall through to lazy recomputation.
 	} else if gcerrors.Code(err) != gcerrors.NotFound {
-		return core.Meta{}, fmt.Errorf("blobstore: read sidecar %q: %w", f.metaPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: read sidecar %q: %w", f.metaKey, mapErr(err))
 	}
 
 	return f.recomputeMeta(ctx)
@@ -538,21 +569,21 @@ func (f *file) Meta(ctx context.Context) (core.Meta, error) {
 // hash, UpdatedAt from the bucket's ModTime. Returns ErrNotFound if the blob
 // is absent.
 func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
-	s := f.store()
-	attrs, err := s.attributes(ctx, f.blobPath())
+	s := f.store
+	attrs, err := s.attributes(ctx, f.blobKey)
 	if err != nil {
 		return core.Meta{}, err
 	}
 
-	r, err := s.bNewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobKey, nil)
 	if err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: open %q: %w", f.blobKey, mapErr(err))
 	}
 	defer r.Close()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, r); err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: hash %q: %w", f.blobPath(), mapErr(err))
+		return core.Meta{}, fmt.Errorf("blobstore: hash %q: %w", f.blobKey, mapErr(err))
 	}
 
 	return core.Meta{
@@ -565,13 +596,13 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 // present, the returned reader verifies the streamed content against it and
 // surfaces ErrDigestMismatch at EOF.
 func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
-	s := f.store()
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
-	r, err := s.bNewReader(ctx, f.blobPath(), nil)
+	r, err := s.bNewReader(ctx, f.blobKey, nil)
 	if err != nil {
-		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobPath(), mapErr(err))
+		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobKey, mapErr(err))
 	}
 
 	want := f.sidecarDigest(ctx)
@@ -584,7 +615,7 @@ func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 // sidecarDigest returns the digest recorded in the file's sidecar, or "" when
 // the sidecar is absent or unreadable (digest verification is then skipped).
 func (f *file) sidecarDigest(ctx context.Context) string {
-	raw, err := f.store().bReadAll(ctx, f.metaPath())
+	raw, err := f.store.bReadAll(ctx, f.metaKey)
 	if err != nil {
 		return ""
 	}
@@ -600,11 +631,11 @@ func (f *file) sidecarDigest(ctx context.Context) string {
 // fileblob) report Unimplemented; that miss is cached as an empty string so
 // the surface falls back to streaming Read without re-probing.
 func (f *file) DownloadURL(ctx context.Context) (string, error) {
-	s := f.store()
+	s := f.store
 	if err := s.authorize(ctx, false); err != nil {
 		return "", err
 	}
-	key := f.blobPath()
+	key := f.blobKey
 	u, err := s.urlCache.getOrCompute(key, func() (string, error) {
 		// The SignedURL expiry equals the cache TTL, clamped by the backend's
 		// own per-cloud maximum, so a cached URL never outlives its validity.
@@ -634,6 +665,48 @@ func (f *file) DownloadURL(ctx context.Context) (string, error) {
 		s.redirect("redirected")
 	}
 	return u, err
+}
+
+// cacheHandle is the blobstore implementation of core.Cache. It is bound to one
+// level's .cache/ folder (dir is that level's prefix, ending in "/") and reuses
+// the file implementation for its entries — a cache file is a File except for
+// its location and the absence of a Version parent.
+//
+// Cache operations authorize as reads, not writes: filling the cache is part of
+// serving a read (a proxy cold fill), so reader policy is sufficient.
+type cacheHandle struct {
+	store *Store
+	dir   string
+}
+
+func (c *cacheHandle) File(name string) core.CacheFile {
+	return newCacheFile(c.store, c.dir, name)
+}
+
+func (c *cacheHandle) Put(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.CacheFile, error) {
+	if err := c.store.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	f := newCacheFile(c.store, c.dir, name)
+	cfg := core.NewCreateConfig(opts...)
+	cfg.AllowOverwrite = true // the cache is mutable; a refill replaces the entry
+	if _, err := c.store.writeFile(ctx, f.blobKey, f.metaKey, body, cfg); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (c *cacheHandle) Delete(ctx context.Context, name string) error {
+	if err := c.store.authorize(ctx, false); err != nil {
+		return err
+	}
+	f := newCacheFile(c.store, c.dir, name)
+	for _, key := range []string{f.blobKey, f.metaKey} {
+		if err := c.store.bDelete(ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+			return fmt.Errorf("blobstore: delete cache %q: %w", key, mapErr(err))
+		}
+	}
+	return nil
 }
 
 // tag is the blobstore implementation of core.Tag.

@@ -202,11 +202,17 @@ The data-plane factory binds a `blobstore.Store` to scope `<ns>/<fmt>`; the
 blobstore path helpers lay out everything from `<package>` down. The namespace
 catalog (admin plane) owns the `<ns>/.meta` object and is its only writer.
 
-A package name that contains `/` — npm scoped names like `@scope/name` — is
-percent-encoded into a single path segment by the blobstore path helpers
-(`@scope%2Fname`) so it stays one bucket child and round-trips losslessly
-through listing. The encoding is internal to `blobstore`; callers use the
-logical name.
+**`blobstore` owns name encoding; callers pass raw names.** Every
+user-provided name component — package, version, file, tag — is rendered into a
+single path-safe bucket segment by one helper (`encodeSegment`/`decodeSegment`)
+and round-trips losslessly through listing. It percent-escapes `/` (so npm
+scoped names like `@scope/name` → `@scope%2Fname` stay one bucket child rather
+than nesting) and escapes a leading `.` to `%2E` (so a user name can never
+masquerade as a reserved dot-file or be dropped from listings). Because
+`PathEscape` already escapes `%`, the encoding is reversible and no real input
+can forge a `%2E`/`%2F`. A surface therefore does **not** sanitize or reject
+names — it forwards whatever a client sends and the Store keeps it safe and
+lossless.
 
 **No side indexes — listing is the index.** The namespace catalog is the
 top-level child listing under the root (drop dot-entries); a namespace
@@ -214,22 +220,28 @@ top-level child listing under the root (drop dot-entries); a namespace
 anything is written under it. Delete-emptiness is "no non-dot children under
 `<ns>/`". There are no `_control`/`namespace-index`/`package-index` sentinels.
 
-**Caches live in `.cache/`, at the level they apply** — namespace,
-format (proxy pull-through cache for proxy namespaces), or package. A proxy
-namespace caches upstream metadata+body under `<ns>/<fmt>/.cache/...`
-(e.g. `<sha256(key)>.body` + `<sha256(key)>.json`). Everything under a
-`.cache/` is opaque to `core.Store` and never appears in package/version/file
-listings.
+**Caches are Files in `.cache/`, at the level they apply** — `Store.Cache()`
+(format level), `Package.Cache()`, and `Version.Cache()` each expose a
+`core.Cache` whose entries are `core.CacheFile`s: the same blob+`.meta` sidecar
+storage as a regular File, reusing the same read/digest/write code, differing
+only in living under a reserved `.cache/` folder and having no Version parent. A
+proxy namespace caches upstream index/metadata (a PyPI simple page, an npm
+packument) keyed by a logical name (e.g. `simple:requests`); artifact bytes are
+**not** cached — they become real Files via `AddFile`. Cache files never appear
+in `Packages`/`Versions`/`Files` listings (the `.cache/` segment is a dropped
+dot-entry); writing a package/version-level cache does, like any object,
+materialize that package/version directory. Cache fill authorizes as a **read**,
+so reader policy suffices.
 
 **Reserved-name discipline — one rule, every level.** A leading `.` is
 reserved at every directory level; listings drop dot-entries when enumerating
-real children (namespaces, formats, packages, versions, files). Because
-namespace names may not begin with `.` or `_` (see name validation below) and
-formats are a fixed allow-list, namespace/format directories never collide
-with the dot-prefixed metadata/cache objects. The format codec in each surface
-**must reject** leading `.`, `..`, absolute paths, and empty path segments in
-user-provided package/version/file/tag names — so user data is never silently
-hidden.
+real children (namespaces, formats, packages, versions, files). Namespace names
+may not begin with `.` or `_` and formats are a fixed allow-list, so
+namespace/format directories never collide with dot-prefixed metadata/cache
+objects. At the package/version/file/tag level, the `blobstore` encoding (above)
+escapes a leading `.` in user names, so user data can never be silently hidden
+or collide with `.meta`/`.tags`/`.cache` — the Store guarantees this rather than
+relying on each surface codec to reject names.
 
 `.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
 opaque caller-owned `Annotations map[string]any` the Store round-trips but
@@ -414,18 +426,18 @@ metadata blob cache lives on the `core` nouns themselves (see below).
   errors are reserved for transport failure, cancellation, oversize, or read
   failure. The underlying `*http.Client` is injectable for tests. It carries no
   package-format behavior.
-- **the `.cache/` blob cache lives on the `core` nouns**, not in a separate
-  object: `Store.Cache()` (format level, `<ns>/<fmt>/.cache/`), `Package.Cache()`
-  (package level), and `Version.Cache()` (version level) each return a
-  `core.Cache` — a thin keyed store of opaque blobs (`Get`/`Put`/`Delete`, keyed
-  by `sha256(logical-key)`). It caches only **derived index/metadata** (a PyPI
-  simple page, an npm packument); artifact bytes are written as real
-  Packages/Versions/Files via the Store and served like hosted content. `Get`
-  returns the blob plus its `ModTime` so the surface owns freshness/TTL. Cache
-  blobs are never returned as listed entries, and the format-level cache is fully
-  invisible to `Packages` (the proxy pull-through level). Cache ops authorize as
-  **reads**, so reader policy is sufficient to populate them (the guard maps
-  cache fill to `OpRead`).
+- **the `.cache/` cache lives on the `core` nouns as Files**, not in a separate
+  object: `Store.Cache()` (format level), `Package.Cache()`, and
+  `Version.Cache()` each return a `core.Cache` whose entries are
+  `core.CacheFile`s — the same blob+`.meta` storage and read/digest code as a
+  regular File, under a reserved `.cache/` folder, keyed by a logical name
+  (`encodeSegment`-escaped, e.g. `simple:requests`). `Put` is mutable
+  (overwrites); freshness comes from `Meta.UpdatedAt`. It caches only **derived
+  index/metadata**; artifact bytes are written as real Packages/Versions/Files
+  and served like hosted content. Cache files never appear in listings, and the
+  format-level cache is fully invisible to `Packages`. Cache ops authorize as
+  **reads**, so reader policy is sufficient (the guard maps cache fill to
+  `OpRead`).
 - **`pkg/proxy/negcache`** — an in-memory, process-local negative cache for
   repeated upstream 404s, keyed by `(namespace, format, logical-key)` with a
   short default TTL (~30s). It is reconstructible and never persisted to the
@@ -511,9 +523,11 @@ shapes, and test layout.
    `--allow-overwrite`) and proxy (writes disabled, pull-through via the proxy
    primitives). Read `Spec.Mode` per request so admin mode switches take
    effect without restart.
-3. Format codec rejects leading-dot/`..`/absolute/empty-segment names and
-   internal-prefix collisions; maps `core`/`namespace`/`auth` sentinels to
-   the format's HTTP error shape via the shared `surface` helpers.
+3. Format codec maps the wire protocol to logical package/version/file/tag
+   names and passes them through raw — `blobstore` owns path-safe encoding, so
+   the codec does not reject or sanitize leading-dot/`..`/slash names. It maps
+   `core`/`namespace`/`auth` sentinels to the format's HTTP error shape via the
+   shared `surface` helpers.
 4. Use the shared helpers: JSON/error writers, `RedirectOrStreamFile`, HEAD
    handling, `MaxBytesReader`, metrics op labeling.
 5. Unit tests for the codec + handler; integration tests against `mem://`;
