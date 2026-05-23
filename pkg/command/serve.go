@@ -15,6 +15,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/echo"
+	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
 // newServeCommand builds the data-plane `serve` command.
@@ -80,6 +81,12 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 	mux := http.NewServeMux()
 	if cfg.RepoType == "echo" {
 		mux.Handle("/", echo.Handler(reg, authn, logger))
+	}
+	if cfg.RepoType == "pypi" {
+		mux.Handle("/", pypi.Handler(reg, authn,
+			pypi.WithMaxUploadBytes(cfg.PyPIMaxUploadBytes),
+			pypi.WithSimpleIndexCacheTTL(cfg.PyPISimpleIndexCacheTTL),
+		))
 	}
 	return mux
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -43,15 +44,16 @@ func TestServeDefaults(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	want := &runtimeConfig{
-		Port:              defaultDataPort,
-		BucketURL:         "mem://",
-		EnableMetrics:     true,
-		MetricsPath:       "/metrics",
-		LogLevel:          "info",
-		LogFormat:         "text",
-		AuthnKind:         "oidc",
-		AuthnOIDCIssuers:  []string{"https://idp.example"},
-		AuthnOIDCAudience: "open-artifact",
+		Port:                    defaultDataPort,
+		BucketURL:               "mem://",
+		EnableMetrics:           true,
+		MetricsPath:             "/metrics",
+		LogLevel:                "info",
+		LogFormat:               "text",
+		AuthnKind:               "oidc",
+		AuthnOIDCIssuers:        []string{"https://idp.example"},
+		AuthnOIDCAudience:       "open-artifact",
+		PyPISimpleIndexCacheTTL: 60 * time.Second,
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {
 		t.Errorf("config mismatch (-want +got):\n%s", diff)
@@ -68,6 +70,8 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 		"--log-level", "debug",
 		"--log-format", "json",
 		"--enable-metrics=false",
+		"--pypi-max-upload-bytes", "1024",
+		"--pypi-simple-index-cache-ttl", "30s",
 		"--authn-oidc-issuers", "https://a.example,https://b.example",
 		"--authn-oidc-audience", "open-artifact",
 	)
@@ -86,6 +90,12 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 	if cfg.EnableMetrics {
 		t.Error("EnableMetrics = true, want false")
 	}
+	if cfg.PyPIMaxUploadBytes != 1024 {
+		t.Errorf("PyPIMaxUploadBytes = %d, want 1024", cfg.PyPIMaxUploadBytes)
+	}
+	if cfg.PyPISimpleIndexCacheTTL != 30*time.Second {
+		t.Errorf("PyPISimpleIndexCacheTTL = %d, want 30s in nanoseconds", cfg.PyPISimpleIndexCacheTTL)
+	}
 	wantIssuers := []string{"https://a.example", "https://b.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("issuers mismatch (-want +got):\n%s", diff)
@@ -97,6 +107,8 @@ func TestServeEnvResolution(t *testing.T) {
 	t.Setenv("OPEN_ARTIFACT_BUCKET_URL", "mem://")
 	t.Setenv("OPEN_ARTIFACT_PORT", "7000")
 	t.Setenv("OPEN_ARTIFACT_LOG_FORMAT", "json")
+	t.Setenv("OPEN_ARTIFACT_PYPI_MAX_UPLOAD_BYTES", "2048")
+	t.Setenv("OPEN_ARTIFACT_PYPI_SIMPLE_INDEX_CACHE_TTL", "15s")
 	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS", "https://env.example,https://two.example")
 	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE", "open-artifact")
 
@@ -112,6 +124,12 @@ func TestServeEnvResolution(t *testing.T) {
 	}
 	if cfg.LogFormat != "json" {
 		t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
+	}
+	if cfg.PyPIMaxUploadBytes != 2048 {
+		t.Errorf("PyPIMaxUploadBytes = %d, want 2048", cfg.PyPIMaxUploadBytes)
+	}
+	if cfg.PyPISimpleIndexCacheTTL != 15*time.Second {
+		t.Errorf("PyPISimpleIndexCacheTTL = %d, want 15s in nanoseconds", cfg.PyPISimpleIndexCacheTTL)
 	}
 	wantIssuers := []string{"https://env.example", "https://two.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers); diff != "" {
@@ -238,7 +256,7 @@ func TestServeHelpListsFlags(t *testing.T) {
 		t.Fatalf("execute serve --help: %v", err)
 	}
 	help := out.String()
-	for _, flag := range []string{"--bucket-url", "--bucket-prefix", "--port", "--log-level", "--repo-type", "--authn-oidc-issuers"} {
+	for _, flag := range []string{"--bucket-url", "--bucket-prefix", "--port", "--log-level", "--repo-type", "--authn-oidc-issuers", "--pypi-max-upload-bytes", "--pypi-simple-index-cache-ttl"} {
 		if !strings.Contains(help, flag) {
 			t.Errorf("serve --help missing %q\n%s", flag, help)
 		}

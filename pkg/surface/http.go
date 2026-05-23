@@ -77,6 +77,8 @@ func storeStatus(err error) (int, string, bool) {
 		return http.StatusNotImplemented, "unsupported", true
 	case errors.Is(err, core.ErrInvalidName):
 		return http.StatusBadRequest, "invalid name", true
+	case errors.Is(err, auth.ErrUnauthorized):
+		return http.StatusForbidden, "forbidden", true
 	default:
 		return http.StatusInternalServerError, "internal server error", false
 	}

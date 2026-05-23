@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -47,11 +48,13 @@ type runtimeConfig struct {
 
 	// Data-plane only. The authenticator is built from these by the serve
 	// wiring; format routes (#25) install the middleware.
-	RepoType          string
-	DisableAuthn      bool
-	AuthnKind         string
-	AuthnOIDCIssuers  []string
-	AuthnOIDCAudience string
+	RepoType                string
+	DisableAuthn            bool
+	AuthnKind               string
+	AuthnOIDCIssuers        []string
+	AuthnOIDCAudience       string
+	PyPIMaxUploadBytes      int64
+	PyPISimpleIndexCacheTTL time.Duration
 
 	// authnKindSet records whether --authn-kind was set explicitly (by flag or
 	// env) rather than left at its default, so it can be flagged as mutually
@@ -79,6 +82,8 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.String("authn-kind", "oidc", "authenticator kind: oidc")
 	f.StringSlice("authn-oidc-issuers", nil, "comma-separated OIDC issuer URLs")
 	f.String("authn-oidc-audience", "", "expected OIDC token audience")
+	f.Int64("pypi-max-upload-bytes", 0, "maximum PyPI multipart upload size in bytes; 0 disables the limit")
+	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
 }
 
 // newViper builds a viper bound to cmd's flags with OPEN_ARTIFACT env
@@ -122,6 +127,8 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.AuthnKind = strings.TrimSpace(v.GetString("authn-kind"))
 		cfg.AuthnOIDCIssuers = splitCSV(v.GetStringSlice("authn-oidc-issuers"))
 		cfg.AuthnOIDCAudience = strings.TrimSpace(v.GetString("authn-oidc-audience"))
+		cfg.PyPIMaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
+		cfg.PyPISimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -162,6 +169,12 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 	if dataPlane {
 		if c.RepoType != "" && !repoTypes[c.RepoType] {
 			errs = append(errs, fmt.Errorf("unsupported --repo-type %q: want pypi, npm, or maven", c.RepoType))
+		}
+		if c.PyPIMaxUploadBytes < 0 {
+			errs = append(errs, fmt.Errorf("invalid --pypi-max-upload-bytes %d: must be >= 0", c.PyPIMaxUploadBytes))
+		}
+		if c.PyPISimpleIndexCacheTTL < 0 {
+			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPISimpleIndexCacheTTL))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}
