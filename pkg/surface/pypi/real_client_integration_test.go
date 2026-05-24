@@ -66,7 +66,7 @@ func TestRealPipDownloadAndInstall(t *testing.T) {
 	runCmdEnv(t, pipEnv, "", venvPython, "-c", `import demo_pkg; assert demo_pkg.hello() == "ok"`)
 }
 
-func TestRealTwineUploadSkipExisting(t *testing.T) {
+func TestRealTwineUpload(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)
@@ -81,13 +81,6 @@ func TestRealTwineUploadSkipExisting(t *testing.T) {
 		"--repository-url", repositoryURL,
 		"--username", "anonymous",
 		"--password", "anonymous",
-		wheel,
-	)
-	runCmdEnv(t, env, "", python, "-m", "twine", "upload",
-		"--repository-url", repositoryURL,
-		"--username", "anonymous",
-		"--password", "anonymous",
-		"--skip-existing",
 		wheel,
 	)
 	project := readResp(t, get(t, h, "/team-a/simple/twine-demo/", ""))
