@@ -9,10 +9,10 @@ for how to run and configure the binary see
 
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
-logging, server lifecycle), namespaces, auth, observability, PyPI hosted
-serving, and the shared proxy primitives exist today; PyPI proxy mode and the
-npm/Maven surfaces are described here as the design they are being built
-toward. Where it matters, sections note what is implemented versus planned.
+logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
+proxy serving, and the shared proxy primitives exist today; the npm/Maven
+surfaces are described here as the design they are being built toward. Where it
+matters, sections note what is implemented versus planned.
 
 ## What this project is
 
@@ -125,7 +125,7 @@ pkg/
     singleflight/    ← typed cold-fill coalescer
     filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
-    pypi/            ← PEP 503/691 hosted (proxy planned)
+    pypi/            ← PEP 503/691 hosted + pull-through proxy
     npm/             ← npm registry hosted + proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
 docs/
@@ -352,6 +352,15 @@ staleness. `WithPolicyCacheTTL(0)` disables the cache. The raw `Scoped.Store()`
 (no guard) remains for trusted internal callers; the admin plane and tests use
 unguarded stores directly.
 
+Proxy mode uses a dedicated seam: `Registry.AuthorizedProxyStore` authorizes the
+subject against the **reader** policy once, up front, and then returns an
+*unguarded* store. Pull-through is a read from the client's perspective —
+clients only `GET`, and the surface populates the cache (both `.cache/` metadata
+and real artifact `File`s) on their behalf — so reader policy gates the whole
+operation and the unguarded store keeps cache-fill writes from being rejected as
+`OpWrite`. This is why a namespace with only a reader policy can populate a proxy
+cache.
+
 The `echo` surface (`pkg/surface/echo`, mounted only for `--repo-type=echo`) is
 a diagnostic — not a package format — that drives this whole stack
 (credential extraction → OIDC verification → 401 challenge → namespace authz)
@@ -486,6 +495,48 @@ remains the source of truth, successful uploads invalidate only the affected
 project on the serving process, and each in-flight render records a generation
 so an invalidation that happens while it is loading cannot store stale output.
 Other replicas may serve an older rendered page until their TTL expires.
+
+### PyPI proxy mode
+
+A PyPI namespace with `mode: proxy` is a pull-through cache of
+`Spec.Proxy.Upstream` (e.g. `https://pypi.org`). The surface reads `Spec.Mode`
+per request and dispatches: hosted routes behave as before; proxy routes reject
+uploads with `405 Method Not Allowed` (`Allow: GET, HEAD`) and serve reads from
+the cache, filling from upstream on a miss. Upstream URLs are built by trimming
+the configured base and appending the PyPI layout (`/simple/`,
+`/simple/<project>/`, and `/pypi/<project>/<version>/json` for delay metadata).
+
+- **Project index** (`/simple/<project>/`) is resolved through three layers: the
+  process-local rendered-page cache (default 10s), then the blob-backed metadata
+  cache keyed `pypi:simple:<project>` (fresh within a default 10m window via
+  `Meta.UpdatedAt`), then an upstream fetch coalesced per `(namespace, project)`
+  with singleflight. The upstream document is parsed as PEP 691 JSON or PEP 503
+  HTML (chosen by response content type), distilled to a canonical
+  `{filename, upstream_url, sha256, requires-python, version, upload-time}` per
+  file (relative links resolved against the simple URL, version derived from the
+  filename), and stored in the metadata cache. File links are rewritten back
+  through open-artifact when rendered, and the response is HTML or PEP 691 JSON
+  by the same `Accept` negotiation as hosted. On an upstream refresh failure the
+  surface serves a stale cached index, else synthesizes a minimal index from
+  locally cached files, else returns `503`. A clean upstream `404` is remembered
+  in the negative cache (default 30s) and returned as `404`.
+- **File download** (`/packages/<project>/<version>/<filename>`) serves the
+  local `File` when present (exactly like hosted). On a miss it resolves the
+  upstream URL from the cached index, evaluates the namespace filter chain
+  (`Ref{Package, Version, PublishedAt}`; a delay filter with an unknown publish
+  time fetches the upstream per-release JSON, then fails closed if still
+  unknown; a deny is logged and returned as `404`), fetches the bytes through
+  open-artifact (never redirecting clients to the public upstream), verifies the
+  advertised `sha256` before committing (mismatch → `502`), and tees the verified
+  bytes into the Store as a real `Package`/`Version`/`File` with PyPI annotations
+  (including `pypi:upstream_url`). A tee-to-store failure is logged but does not
+  fail the client response, since upstream delivered the bytes. `HEAD` answers
+  existence from index metadata without fetching or caching bytes. The buffered
+  upstream body is capped (default 1 GiB); verifying before committing is the
+  reason bytes are buffered rather than streamed.
+
+The simple **root** (`/simple/`) in proxy mode lists only locally cached
+projects rather than proxying the upstream's full registry listing.
 
 ## gocloud.dev/blob notes
 

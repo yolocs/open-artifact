@@ -51,6 +51,36 @@ func (r *Registry) AuthorizedStore(ctx context.Context, namespace, format string
 	return store, entry.spec, nil
 }
 
+// AuthorizedProxyStore returns an unguarded core.Store for proxy pull-through
+// plus the namespace spec, after authorizing ac against the namespace's reader
+// policy. Pull-through is a read from the client's perspective — clients only
+// GET, and the surface populates the cache (both .cache/ metadata and real
+// artifact Files) on their behalf — so reader policy gates the whole operation
+// and the returned Store is unguarded so cache-fill writes are not rejected as
+// OpWrite. An unknown namespace maps to ErrNotFound; a subject that is not a
+// reader maps to auth.ErrUnauthorized.
+func (r *Registry) AuthorizedProxyStore(ctx context.Context, namespace, format string, ac *auth.AuthContext) (core.Store, Spec, error) {
+	scoped, err := r.For(namespace, format)
+	if err != nil {
+		return nil, Spec{}, err
+	}
+	entry, err := r.cache.get(ctx, namespace, r.load)
+	if err != nil {
+		return nil, Spec{}, err
+	}
+	if entry.notFound {
+		return nil, Spec{}, fmt.Errorf("%w: %q", ErrNotFound, namespace)
+	}
+	if err := entry.authorizer.Authorize(ctx, ac, auth.OpRead); err != nil {
+		return nil, Spec{}, err
+	}
+	store, err := scoped.Store()
+	if err != nil {
+		return nil, Spec{}, err
+	}
+	return store, entry.spec, nil
+}
+
 // guardFor adapts a compiled policy and subject to the blobstore.Guard hook:
 // reads authorize OpRead, writes OpWrite.
 func guardFor(authorizer *compiledPolicy, ac *auth.AuthContext) blobstore.Guard {

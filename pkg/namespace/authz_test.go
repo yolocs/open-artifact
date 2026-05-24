@@ -70,6 +70,48 @@ func TestAuthorizedCrossNamespaceIsolation(t *testing.T) {
 	})
 }
 
+func TestAuthorizedProxyStoreReaderCanFillCache(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	b := memBucket(t)
+	store, _ := NewStore(b, "")
+	reg, _ := NewRegistry(b, "", store)
+
+	// A proxy namespace with only a reader policy: the reader must be able to
+	// populate the cache (write real artifact Files) even though it cannot write
+	// in hosted mode.
+	if _, err := store.Put(ctx, &Namespace{
+		Name: "team-proxy",
+		Spec: Spec{Mode: ModeProxy, Proxy: Proxy{Upstream: "https://pypi.org"}, Policy: readerPolicy("alice")},
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	alice := oidcCtx("https://idp", "alice", "", nil)
+
+	s, spec, err := reg.AuthorizedProxyStore(ctx, "team-proxy", "pypi", alice)
+	if err != nil {
+		t.Fatalf("AuthorizedProxyStore: %v", err)
+	}
+	if !spec.IsProxy() {
+		t.Fatalf("spec.IsProxy() = false, want true")
+	}
+	if _, err := s.AddPackage(ctx, "requests"); err != nil {
+		t.Errorf("reader cache fill (AddPackage) = %v, want allowed (unguarded proxy store)", err)
+	}
+
+	// A non-reader is denied before any store handle is usable.
+	bob := oidcCtx("https://idp", "bob", "", nil)
+	if _, _, err := reg.AuthorizedProxyStore(ctx, "team-proxy", "pypi", bob); !errors.Is(err, auth.ErrUnauthorized) {
+		t.Errorf("non-reader AuthorizedProxyStore = %v, want ErrUnauthorized", err)
+	}
+
+	// An unknown namespace is ErrNotFound.
+	if _, _, err := reg.AuthorizedProxyStore(ctx, "missing", "pypi", alice); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown namespace = %v, want ErrNotFound", err)
+	}
+}
+
 func TestAuthorizedReadWriteSeparation(t *testing.T) {
 	t.Parallel()
 

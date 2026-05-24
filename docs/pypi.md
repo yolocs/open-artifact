@@ -1,8 +1,11 @@
 # PyPI Surface
 
-The PyPI surface serves hosted Python packages from a namespace-scoped
-`core.Store`. Start it with `--repo-type=pypi`; all package routes live under
-the namespace name.
+The PyPI surface serves Python packages from a namespace-scoped `core.Store`.
+Start it with `--repo-type=pypi`; all package routes live under the namespace
+name. A namespace serves in **hosted** mode (accepts uploads, serves what was
+published) or **proxy** mode (a pull-through cache of an upstream PyPI). The mode
+is read per request from the namespace spec, so admin mode changes take effect
+without a restart.
 
 ## Routes
 
@@ -20,6 +23,28 @@ Project names are normalized with PEP 503 rules at upload and read time. Names
 starting with `.`, path separators, traversal, and unsupported file extensions
 are rejected.
 
+## Proxy mode
+
+A namespace with `mode: proxy` and `proxy.upstream` set (for example
+`https://pypi.org`) is a pull-through cache:
+
+- Uploads (`POST`/`PUT`) return `405 Method Not Allowed` with `Allow: GET, HEAD`.
+- `GET|HEAD /{namespace}/simple/{project}/` serves the upstream simple index,
+  rewriting file links back through open-artifact. The index is parsed from
+  PEP 691 JSON or PEP 503 HTML and cached; if upstream is unavailable the surface
+  serves a stale cached index, then a minimal index synthesized from already
+  cached files, and finally returns `503`. A clean upstream `404` returns `404`.
+- `GET /{namespace}/packages/{project}/{version}/{filename}` serves a cached file
+  if present, otherwise fetches it from upstream through open-artifact, verifies
+  the advertised `sha256` (mismatch → `502`), caches it, and serves it. The
+  namespace's proxy filter chain (`allow`/`deny`/`delay`) is evaluated on
+  downloads; a denied artifact returns `404`.
+- `GET|HEAD /{namespace}/simple/` lists only locally cached projects, not the
+  upstream's full registry listing.
+
+Reader policy is sufficient to populate a proxy cache — the surface writes
+cached files on the caller's behalf. Clients only ever read.
+
 ## Runtime Flags
 
 - `--pypi-max-upload-bytes` / `OPEN_ARTIFACT_PYPI_MAX_UPLOAD_BYTES`: maximum
@@ -27,7 +52,22 @@ are rejected.
   default cap.
 - `--pypi-simple-index-cache-ttl` /
   `OPEN_ARTIFACT_PYPI_SIMPLE_INDEX_CACHE_TTL`: per-process cache TTL for
-  project simple indexes. The default is `60s`; `0` disables caching.
+  project simple indexes (both hosted and proxy). The default is `60s`; `0`
+  disables caching.
+- `--pypi-proxy-index-cache-ttl` /
+  `OPEN_ARTIFACT_PYPI_PROXY_INDEX_CACHE_TTL`: per-process cache TTL for the
+  rendered proxy simple index. The default is `10s`; `0` uses the default, a
+  negative value disables it.
+- `--pypi-proxy-metadata-ttl` / `OPEN_ARTIFACT_PYPI_PROXY_METADATA_TTL`:
+  freshness window for the blob-backed cached upstream simple index. The default
+  is `10m`; `0` uses the default.
+- `--pypi-proxy-negative-cache-ttl` /
+  `OPEN_ARTIFACT_PYPI_PROXY_NEGATIVE_CACHE_TTL`: how long an upstream `404` is
+  remembered. The default is `30s`; `0` uses the default.
+- `--pypi-proxy-max-artifact-bytes` /
+  `OPEN_ARTIFACT_PYPI_PROXY_MAX_ARTIFACT_BYTES`: cap on the buffered upstream
+  artifact during a proxy cache fill (bytes are buffered to verify the hash
+  before committing). The default is `1073741824` bytes; `0` uses the default.
 
 Successful uploads invalidate only the affected project on the local process.
 Multi-replica deployments may serve stale project indexes until the TTL expires.

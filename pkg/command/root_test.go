@@ -55,8 +55,12 @@ func TestServeDefaults(t *testing.T) {
 		AuthnOIDCIssuers:  []string{"https://idp.example"},
 		AuthnOIDCAudience: "open-artifact",
 		PyPI: pypi.Config{
-			MaxUploadBytes:      pypi.DefaultMaxUploadBytes,
-			SimpleIndexCacheTTL: 60 * time.Second,
+			MaxUploadBytes:        pypi.DefaultMaxUploadBytes,
+			SimpleIndexCacheTTL:   60 * time.Second,
+			ProxyIndexCacheTTL:    pypi.DefaultProxyIndexCacheTTL,
+			ProxyMetadataTTL:      pypi.DefaultProxyMetadataTTL,
+			ProxyNegativeCacheTTL: pypi.DefaultProxyNegativeCacheTTL,
+			ProxyMaxArtifactBytes: pypi.DefaultProxyMaxArtifactBytes,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {

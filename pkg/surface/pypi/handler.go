@@ -29,9 +29,27 @@ const (
 
 const DefaultMaxUploadBytes int64 = 100 << 20
 
+// Proxy-mode defaults. The in-process index cache is a short rendered-page cache
+// in front of the blob-backed metadata cache; the metadata TTL is the freshness
+// window on the cached upstream simple index; the negative TTL bounds how long
+// an upstream 404 is remembered; the artifact cap bounds the buffered upstream
+// body during a cold cache fill.
+const (
+	DefaultProxyIndexCacheTTL          = 10 * time.Second
+	DefaultProxyMetadataTTL            = 10 * time.Minute
+	DefaultProxyNegativeCacheTTL       = 30 * time.Second
+	DefaultProxyMaxArtifactBytes int64 = 1 << 30
+)
+
 type Config struct {
 	MaxUploadBytes      int64
 	SimpleIndexCacheTTL time.Duration
+
+	// Proxy-mode knobs. A zero value falls back to the matching Default above.
+	ProxyIndexCacheTTL    time.Duration
+	ProxyMetadataTTL      time.Duration
+	ProxyNegativeCacheTTL time.Duration
+	ProxyMaxArtifactBytes int64
 }
 
 func (c Config) uploadLimit() int64 {
@@ -41,12 +59,38 @@ func (c Config) uploadLimit() int64 {
 	return c.MaxUploadBytes
 }
 
+func (c Config) proxyMetadataTTL() time.Duration {
+	if c.ProxyMetadataTTL <= 0 {
+		return DefaultProxyMetadataTTL
+	}
+	return c.ProxyMetadataTTL
+}
+
+func (c Config) proxyMaxArtifactBytes() int64 {
+	if c.ProxyMaxArtifactBytes <= 0 {
+		return DefaultProxyMaxArtifactBytes
+	}
+	return c.ProxyMaxArtifactBytes
+}
+
+// proxyIndexCacheTTL resolves the in-process rendered-index cache TTL: zero
+// means the default, a negative value disables the cache (newProjectCache treats
+// any non-positive TTL as disabled), which lets tests force every request to
+// re-resolve through the durable cache.
+func (c Config) proxyIndexCacheTTL() time.Duration {
+	if c.ProxyIndexCacheTTL == 0 {
+		return DefaultProxyIndexCacheTTL
+	}
+	return c.ProxyIndexCacheTTL
+}
+
 func Handler(reg *namespace.Registry, authn auth.Authenticator, cfg Config) http.Handler {
 	h := &handler{
 		reg:   reg,
 		opts:  cfg,
 		now:   time.Now,
 		cache: newProjectCache(cfg.SimpleIndexCacheTTL, time.Now),
+		proxy: newProxyEngine(cfg, time.Now),
 	}
 	return auth.Middleware(authn)(h.router())
 }
@@ -56,6 +100,7 @@ type handler struct {
 	opts  Config
 	now   func() time.Time
 	cache *projectCache
+	proxy *proxyEngine
 }
 
 func (h *handler) router() http.Handler {
@@ -79,6 +124,16 @@ func (h *handler) uploadRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	spec, ok := h.spec(w, r, ns, true)
+	if !ok {
+		return
+	}
+	if spec.IsProxy() {
+		// A proxy namespace is a pull-through cache: it never accepts client
+		// uploads regardless of the caller's policy.
+		surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
+		return
+	}
 	h.upload(w, r, ns)
 }
 
@@ -88,6 +143,18 @@ func (h *handler) rootIndexRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	spec, ok := h.spec(w, r, ns, false)
+	if !ok {
+		return
+	}
+	if spec.IsProxy() {
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxyRootIndex(w, r, store)
+		return
+	}
 	h.rootIndex(w, r, ns)
 }
 
@@ -95,6 +162,18 @@ func (h *handler) projectIndexRoute(w http.ResponseWriter, r *http.Request) {
 	observability.SetOperation(r, "simple.project")
 	ns, ok := h.namespace(w, r, surface.NamespaceDataRead)
 	if !ok {
+		return
+	}
+	spec, ok := h.spec(w, r, ns, false)
+	if !ok {
+		return
+	}
+	if spec.IsProxy() {
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxy.projectIndex(w, r, ns, spec, store, mux.Vars(r)["project"])
 		return
 	}
 	h.projectIndex(w, r, ns, mux.Vars(r)["project"])
@@ -107,7 +186,49 @@ func (h *handler) downloadRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vars := mux.Vars(r)
+	spec, ok := h.spec(w, r, ns, false)
+	if !ok {
+		return
+	}
+	if spec.IsProxy() {
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxy.download(w, r, ns, spec, store, vars["project"], vars["version"], vars["filename"])
+		return
+	}
 	h.download(w, r, ns, vars["project"], vars["version"], vars["filename"])
+}
+
+// spec resolves the namespace spec for mode dispatch. It performs no
+// authorization itself — hosted routes authorize lazily through the guarded
+// store, and proxy routes authorize the reader policy via authorizedProxyStore
+// — so it only surfaces namespace-resolution errors (unknown name, bad schema).
+func (h *handler) spec(w http.ResponseWriter, r *http.Request, ns string, write bool) (namespace.Spec, bool) {
+	ac := auth.FromContext(r.Context())
+	_, spec, err := h.reg.AuthorizedStore(r.Context(), ns, pypiFormat, ac)
+	if err != nil {
+		ctx := surface.NamespaceDataRead
+		if write {
+			ctx = surface.NamespaceDataWrite
+		}
+		surface.WriteNamespaceError(w, r, err, ctx)
+		return namespace.Spec{}, false
+	}
+	return spec, true
+}
+
+// authorizedProxyStore authorizes the caller against the namespace reader policy
+// and returns an unguarded store for pull-through cache fills.
+func (h *handler) authorizedProxyStore(w http.ResponseWriter, r *http.Request, ns string) (core.Store, bool) {
+	ac := auth.FromContext(r.Context())
+	store, _, err := h.reg.AuthorizedProxyStore(r.Context(), ns, pypiFormat, ac)
+	if err != nil {
+		surface.WriteNamespaceError(w, r, err, surface.NamespaceDataRead)
+		return nil, false
+	}
+	return store, true
 }
 
 func (h *handler) namespace(w http.ResponseWriter, r *http.Request, ctx surface.NamespaceErrorContext) (string, bool) {
@@ -230,6 +351,22 @@ func (h *handler) rootIndex(w http.ResponseWriter, r *http.Request, ns string) {
 	if err != nil {
 		return
 	}
+	pkgs, err := store.Packages(r.Context())
+	if err != nil {
+		surface.WriteStoreError(w, r, err)
+		return
+	}
+	projects := make([]Project, 0, len(pkgs))
+	for _, p := range pkgs {
+		projects = append(projects, Project{Name: p.Name()})
+	}
+	h.writeHTML(w, r, RenderRootHTML(projects))
+}
+
+// proxyRootIndex serves a proxy namespace's simple root from the locally cached
+// packages. It does not fetch the upstream's full project listing (the entire
+// registry); a project becomes visible here once it has been pulled through.
+func (h *handler) proxyRootIndex(w http.ResponseWriter, r *http.Request, store core.Store) {
 	pkgs, err := store.Packages(r.Context())
 	if err != nil {
 		surface.WriteStoreError(w, r, err)

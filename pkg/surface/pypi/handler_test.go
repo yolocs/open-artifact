@@ -285,11 +285,15 @@ func TestRootIndexEmptyScopeAndProxyMode(t *testing.T) {
 	if body := readResp(t, empty); !strings.Contains(body, `pypi:repository-version`) {
 		t.Fatalf("empty root missing repository version meta: %s", body)
 	}
+	// A proxy namespace's simple root lists locally cached packages (none yet)
+	// rather than proxying the upstream's full project listing.
 	proxy := get(t, h, "/team-proxy/simple/", "")
-	if proxy.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("proxy status = %d, want %d: %s", proxy.StatusCode, http.StatusNotImplemented, readResp(t, proxy))
+	if proxy.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d, want %d: %s", proxy.StatusCode, http.StatusOK, readResp(t, proxy))
 	}
-	_ = readResp(t, proxy)
+	if body := readResp(t, proxy); !strings.Contains(body, `pypi:repository-version`) {
+		t.Fatalf("proxy root missing repository version meta: %s", body)
+	}
 }
 
 func TestObservabilityLabelsPyPIOperations(t *testing.T) {
