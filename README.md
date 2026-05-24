@@ -60,7 +60,7 @@ dependency rule, storage model, and the per-surface contract.
 ```sh
 make build            # build the binary
 make test             # unit tests (race)
-make test-integration # + integration tests against memblob/fileblob
+make test-integration # real package-manager client tests
 ```
 
 ## License

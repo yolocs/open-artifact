@@ -1,5 +1,3 @@
-//go:build integration
-
 package pypi_test
 
 import (

@@ -91,7 +91,7 @@ belong there, not buried in a commit message or an issue comment.
   memblob/fileblob; only the package-manager client tools need to be
   installed.
 - Every change: `go test -race ./...`; for storage/surface work also
-  `go test -race -tags=integration ./...`.
+  `go test -race -tags=integration -run 'TestReal' ./...`.
 
 ## Predecessor code is historical context only
 

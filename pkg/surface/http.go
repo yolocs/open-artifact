@@ -19,7 +19,7 @@ type NamespaceErrorContext int
 
 const (
 	NamespaceDataRead NamespaceErrorContext = iota
-	NamespaceAdminWrite
+	NamespaceDataWrite
 )
 
 func WriteJSON(w http.ResponseWriter, status int, v any) {
@@ -92,7 +92,7 @@ func namespaceStatus(err error, ctx NamespaceErrorContext) (int, string, bool) {
 	case errors.Is(err, namespace.ErrInvalidPolicy):
 		return http.StatusBadRequest, "invalid namespace policy", true
 	case errors.Is(err, namespace.ErrUnsupportedSchemaVersion):
-		if ctx == NamespaceAdminWrite {
+		if ctx == NamespaceDataWrite {
 			return http.StatusBadRequest, "unsupported namespace schema version", true
 		}
 		return http.StatusInternalServerError, "internal server error", true

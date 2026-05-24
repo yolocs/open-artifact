@@ -7,7 +7,6 @@ import (
 	"path"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/yolocs/open-artifact/pkg/core"
@@ -122,60 +121,33 @@ func validateSegment(s string, normalizeProject bool) error {
 }
 
 func PrefersSimpleJSON(accept string) bool {
-	if strings.TrimSpace(accept) == "" {
-		return false
-	}
-	choice, ok := parseSimpleAccept(accept)
-	if !ok {
-		return false
-	}
-	return choice.JSON > 0 && choice.JSON >= choice.HTML
+	return preferredSimpleResponse(accept) == simpleResponseJSON
 }
 
-type simpleAcceptChoice struct {
-	JSON float64
-	HTML float64
-}
+type simpleResponse int
 
-func parseSimpleAccept(header string) (simpleAcceptChoice, bool) {
-	choice := simpleAcceptChoice{JSON: -1, HTML: -1}
+const (
+	simpleResponseHTML simpleResponse = iota
+	simpleResponseJSON
+)
+
+func preferredSimpleResponse(header string) simpleResponse {
 	for _, part := range strings.Split(header, ",") {
 		mt, params, err := mime.ParseMediaType(strings.TrimSpace(part))
 		if err != nil {
-			return simpleAcceptChoice{}, false
+			return simpleResponseHTML
 		}
-		q, ok := mediaQ(params)
-		if !ok {
-			return simpleAcceptChoice{}, false
+		if params["q"] == "0" {
+			continue
 		}
-		choice.record(mt, q)
-	}
-	return choice, true
-}
-
-func mediaQ(params map[string]string) (float64, bool) {
-	if params["q"] == "" {
-		return 1, true
-	}
-	q, err := strconv.ParseFloat(params["q"], 64)
-	return q, err == nil && q >= 0 && q <= 1
-}
-
-func (c *simpleAcceptChoice) record(mediaType string, q float64) {
-	switch mediaType {
-	case simpleJSONMediaType:
-		if q > c.JSON {
-			c.JSON = q
-		}
-	case "*/*", "application/*":
-		if q > c.JSON {
-			c.JSON = q
-		}
-	case "text/html", "application/vnd.pypi.simple.v1+html":
-		if q > c.HTML {
-			c.HTML = q
+		switch mt {
+		case simpleJSONMediaType, "*/*", "application/*":
+			return simpleResponseJSON
+		case "text/html", "application/vnd.pypi.simple.v1+html":
+			return simpleResponseHTML
 		}
 	}
+	return simpleResponseHTML
 }
 
 func HashFromDigest(digest string) string {

@@ -74,9 +74,9 @@ func TestWriteNamespaceErrorMapsNamespaceAndAuthErrors(t *testing.T) {
 		{name: "not empty", err: namespace.ErrNotEmpty, status: http.StatusConflict, body: `{"error":"namespace not empty"}` + "\n"},
 		{name: "unauthorized", err: auth.ErrUnauthorized, status: http.StatusForbidden, body: `{"error":"forbidden"}` + "\n"},
 		{
-			name:   "unsupported schema version during admin write",
+			name:   "unsupported schema version during data write",
 			err:    namespace.ErrUnsupportedSchemaVersion,
-			op:     NamespaceAdminWrite,
+			op:     NamespaceDataWrite,
 			status: http.StatusBadRequest,
 			body:   `{"error":"unsupported namespace schema version"}` + "\n",
 		},

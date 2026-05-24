@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
+
 	"github.com/yolocs/open-artifact/pkg/auth"
 	"github.com/yolocs/open-artifact/pkg/core"
 	"github.com/yolocs/open-artifact/pkg/namespace"
@@ -57,27 +59,23 @@ type handler struct {
 }
 
 func (h *handler) router() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /{namespace}", h.uploadRoute)
-	mux.HandleFunc("PUT /{namespace}", h.uploadRoute)
-	mux.HandleFunc("POST /{namespace}/{$}", h.uploadRoute)
-	mux.HandleFunc("PUT /{namespace}/{$}", h.uploadRoute)
-	mux.HandleFunc("GET /{namespace}/simple", h.rootIndexRoute)
-	mux.HandleFunc("HEAD /{namespace}/simple", h.rootIndexRoute)
-	mux.HandleFunc("GET /{namespace}/simple/{$}", h.rootIndexRoute)
-	mux.HandleFunc("HEAD /{namespace}/simple/{$}", h.rootIndexRoute)
-	mux.HandleFunc("GET /{namespace}/simple/{project}", h.projectIndexRoute)
-	mux.HandleFunc("HEAD /{namespace}/simple/{project}", h.projectIndexRoute)
-	mux.HandleFunc("GET /{namespace}/simple/{project}/{$}", h.projectIndexRoute)
-	mux.HandleFunc("HEAD /{namespace}/simple/{project}/{$}", h.projectIndexRoute)
-	mux.HandleFunc("GET /{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute)
-	mux.HandleFunc("HEAD /{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute)
-	return mux
+	r := mux.NewRouter()
+	r.HandleFunc("/{namespace}", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
+	r.HandleFunc("/{namespace}/", h.uploadRoute).Methods(http.MethodPost, http.MethodPut)
+	r.HandleFunc("/{namespace}/simple", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/", h.rootIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/{project}", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/simple/{project}/", h.projectIndexRoute).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc("/{namespace}/packages/{project}/{version}/{filename}", h.downloadRoute).Methods(http.MethodGet, http.MethodHead)
+	r.MethodNotAllowedHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut})
+	})
+	return r
 }
 
 func (h *handler) uploadRoute(w http.ResponseWriter, r *http.Request) {
 	observability.SetOperation(r, "upload")
-	ns, ok := h.namespace(w, r, surface.NamespaceAdminWrite)
+	ns, ok := h.namespace(w, r, surface.NamespaceDataWrite)
 	if !ok {
 		return
 	}
@@ -99,7 +97,7 @@ func (h *handler) projectIndexRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.projectIndex(w, r, ns, r.PathValue("project"))
+	h.projectIndex(w, r, ns, mux.Vars(r)["project"])
 }
 
 func (h *handler) downloadRoute(w http.ResponseWriter, r *http.Request) {
@@ -108,11 +106,12 @@ func (h *handler) downloadRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.download(w, r, ns, r.PathValue("project"), r.PathValue("version"), r.PathValue("filename"))
+	vars := mux.Vars(r)
+	h.download(w, r, ns, vars["project"], vars["version"], vars["filename"])
 }
 
 func (h *handler) namespace(w http.ResponseWriter, r *http.Request, ctx surface.NamespaceErrorContext) (string, bool) {
-	ns := r.PathValue("namespace")
+	ns := mux.Vars(r)["namespace"]
 	if err := namespace.ValidateName(ns); err != nil {
 		surface.WriteNamespaceError(w, r, err, ctx)
 		return "", false
@@ -344,7 +343,7 @@ func (h *handler) authorizedHostedStore(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		ctx := surface.NamespaceDataRead
 		if write {
-			ctx = surface.NamespaceAdminWrite
+			ctx = surface.NamespaceDataWrite
 		}
 		surface.WriteNamespaceError(w, r, err, ctx)
 		return nil, err

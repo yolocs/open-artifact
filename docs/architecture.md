@@ -551,8 +551,8 @@ shapes, and test layout.
    shared `surface` helpers.
 4. Use the shared helpers: JSON/error writers, `RedirectOrStreamFile`, HEAD
    handling, `MaxBytesReader`, metrics op labeling.
-5. Unit tests for the codec + handler; integration tests against `mem://`;
-   a real-client end-to-end test through the harness.
+5. Unit tests for the codec + handler against `mem://`; integration tests use
+   real package-manager clients against the harness.
 6. Operator notes in `docs/`; flags/env for upstream URL, upload caps, and
    cache TTLs.
 

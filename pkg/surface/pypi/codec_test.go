@@ -83,11 +83,12 @@ func TestPrefersSimpleJSON(t *testing.T) {
 	}{
 		{name: "absent defaults html", accept: "", want: false},
 		{name: "json explicit", accept: "application/vnd.pypi.simple.v1+json", want: true},
-		{name: "json beats html", accept: "text/html;q=0.2, application/vnd.pypi.simple.v1+json;q=0.8", want: true},
-		{name: "html beats json", accept: "text/html;q=0.9, application/vnd.pypi.simple.v1+json;q=0.1", want: false},
-		{name: "equal prefers json", accept: "text/html;q=0.5, application/vnd.pypi.simple.v1+json;q=0.5", want: true},
+		{name: "first recognized json wins", accept: "application/vnd.pypi.simple.v1+json, text/html", want: true},
+		{name: "first recognized html wins", accept: "text/html, application/vnd.pypi.simple.v1+json", want: false},
 		{name: "wildcard accepts json", accept: "*/*", want: true},
+		{name: "application wildcard accepts json", accept: "application/*", want: true},
 		{name: "json q zero ignored", accept: "application/vnd.pypi.simple.v1+json;q=0", want: false},
+		{name: "q zero skips to next", accept: "text/html;q=0, application/vnd.pypi.simple.v1+json", want: true},
 		{name: "unparseable defaults html", accept: "not a real accept header", want: false},
 	}
 	for _, tc := range tests {
