@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/yolocs/open-artifact/pkg/auth"
@@ -20,7 +19,7 @@ type NamespaceErrorContext int
 
 const (
 	NamespaceDataRead NamespaceErrorContext = iota
-	NamespaceAdminWrite
+	NamespaceDataWrite
 )
 
 func WriteJSON(w http.ResponseWriter, status int, v any) {
@@ -77,6 +76,8 @@ func storeStatus(err error) (int, string, bool) {
 		return http.StatusNotImplemented, "unsupported", true
 	case errors.Is(err, core.ErrInvalidName):
 		return http.StatusBadRequest, "invalid name", true
+	case errors.Is(err, auth.ErrUnauthorized):
+		return http.StatusForbidden, "forbidden", true
 	default:
 		return http.StatusInternalServerError, "internal server error", false
 	}
@@ -91,7 +92,7 @@ func namespaceStatus(err error, ctx NamespaceErrorContext) (int, string, bool) {
 	case errors.Is(err, namespace.ErrInvalidPolicy):
 		return http.StatusBadRequest, "invalid namespace policy", true
 	case errors.Is(err, namespace.ErrUnsupportedSchemaVersion):
-		if ctx == NamespaceAdminWrite {
+		if ctx == NamespaceDataWrite {
 			return http.StatusBadRequest, "unsupported namespace schema version", true
 		}
 		return http.StatusInternalServerError, "internal server error", true
@@ -170,28 +171,4 @@ func RedirectOrStreamFile(w http.ResponseWriter, r *http.Request, f core.File, c
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf.Bytes())
-}
-
-func ValidateName(name string) error {
-	decoded, err := url.PathUnescape(name)
-	if err != nil {
-		return namespace.ErrInvalidName
-	}
-	if decoded == "" || strings.HasPrefix(decoded, "/") {
-		return namespace.ErrInvalidName
-	}
-	for _, part := range strings.Split(decoded, "/") {
-		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") {
-			return namespace.ErrInvalidName
-		}
-	}
-	return nil
-}
-
-func ExtractNamespace(r *http.Request, varName string) (string, error) {
-	name := r.PathValue(varName)
-	if err := namespace.ValidateName(name); err != nil {
-		return "", err
-	}
-	return name, nil
 }

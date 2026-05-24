@@ -24,19 +24,31 @@ import (
 // wrapper around it: the scoped Store carries the guard and consults it on
 // every operation, so there is no decorating handle to navigate around.
 func (r *Registry) Authorized(ctx context.Context, namespace, format string, ac *auth.AuthContext) (core.Store, error) {
+	store, _, err := r.AuthorizedStore(ctx, namespace, format, ac)
+	return store, err
+}
+
+// AuthorizedStore returns a guarded core.Store plus the namespace spec loaded
+// from the same cached namespace lookup. Format surfaces use the spec for
+// hosted/proxy dispatch without re-reading namespace metadata separately.
+func (r *Registry) AuthorizedStore(ctx context.Context, namespace, format string, ac *auth.AuthContext) (core.Store, Spec, error) {
 	scoped, err := r.For(namespace, format)
 	if err != nil {
-		return nil, err
+		return nil, Spec{}, err
 	}
 	entry, err := r.cache.get(ctx, namespace, r.load)
 	if err != nil {
-		return nil, err
+		return nil, Spec{}, err
 	}
 	if entry.notFound {
-		return nil, fmt.Errorf("%w: %q", ErrNotFound, namespace)
+		return nil, Spec{}, fmt.Errorf("%w: %q", ErrNotFound, namespace)
 	}
 	scoped.guard = guardFor(entry.authorizer, ac)
-	return scoped.Store()
+	store, err := scoped.Store()
+	if err != nil {
+		return nil, Spec{}, err
+	}
+	return store, entry.spec, nil
 }
 
 // guardFor adapts a compiled policy and subject to the blobstore.Guard hook:
@@ -69,13 +81,14 @@ func (r *Registry) load(ctx context.Context, name string) (*policyEntry, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &policyEntry{authorizer: compiled}, nil
+	return &policyEntry{authorizer: compiled, spec: ns.Spec}, nil
 }
 
 // policyEntry is a cached lookup: either a compiled authorizer for an existing
 // namespace, or a negative result for a missing one.
 type policyEntry struct {
 	authorizer *compiledPolicy
+	spec       Spec
 	notFound   bool
 	expires    time.Time
 }

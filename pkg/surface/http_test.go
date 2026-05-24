@@ -74,9 +74,9 @@ func TestWriteNamespaceErrorMapsNamespaceAndAuthErrors(t *testing.T) {
 		{name: "not empty", err: namespace.ErrNotEmpty, status: http.StatusConflict, body: `{"error":"namespace not empty"}` + "\n"},
 		{name: "unauthorized", err: auth.ErrUnauthorized, status: http.StatusForbidden, body: `{"error":"forbidden"}` + "\n"},
 		{
-			name:   "unsupported schema version during admin write",
+			name:   "unsupported schema version during data write",
 			err:    namespace.ErrUnsupportedSchemaVersion,
-			op:     NamespaceAdminWrite,
+			op:     NamespaceDataWrite,
 			status: http.StatusBadRequest,
 			body:   `{"error":"unsupported namespace schema version"}` + "\n",
 		},
@@ -227,71 +227,6 @@ func TestRedirectOrStreamFileMapsDigestMismatchBeforeWritingBody(t *testing.T) {
 	}
 	if got := rr.Body.String(); got != `{"error":"digest mismatch"}`+"\n" {
 		t.Fatalf("body = %q", got)
-	}
-}
-
-func TestExtractNamespaceRejectsInvalidRouteValues(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{name: "missing", value: ""},
-		{name: "leading dot", value: ".internal"},
-		{name: "traversal", value: "../global"},
-		{name: "absolute", value: "/pypi/global"},
-		{name: "slash", value: "pypi/global"},
-		{name: "empty segment", value: "pypi//global"},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			if tt.value != "" {
-				req.SetPathValue("namespace", tt.value)
-			}
-
-			_, err := ExtractNamespace(req, "namespace")
-			if !errors.Is(err, namespace.ErrInvalidName) {
-				t.Fatalf("ExtractNamespace error = %v, want ErrInvalidName", err)
-			}
-		})
-	}
-}
-
-func TestExtractNamespaceAcceptsNamespaceName(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetPathValue("namespace", "team-a")
-
-	got, err := ExtractNamespace(req, "namespace")
-	if err != nil {
-		t.Fatalf("ExtractNamespace: %v", err)
-	}
-	if got != "team-a" {
-		t.Fatalf("namespace = %q, want team-a", got)
-	}
-}
-
-func TestValidateNameRejectsStorageCollisions(t *testing.T) {
-	t.Parallel()
-
-	tests := []string{".meta", ".tags/latest", "pkg/../secret", "/absolute", "pkg//file", "bad%zz"}
-	for _, input := range tests {
-		input := input
-		t.Run(input, func(t *testing.T) {
-			t.Parallel()
-
-			err := ValidateName(input)
-			if !errors.Is(err, namespace.ErrInvalidName) {
-				t.Fatalf("ValidateName(%q) = %v, want ErrInvalidName", input, err)
-			}
-		})
 	}
 }
 

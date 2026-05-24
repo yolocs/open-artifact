@@ -10,7 +10,7 @@ build: ## Build both binaries into ./bin
 test: ## Run unit tests with the race detector
 	go test -race ./...
 
-test-integration: ## Run unit + integration tests (memblob/fileblob backends)
+test-integration: ## Run real-client integration tests (requires python3, pip, and twine)
 	go test -race -tags=integration ./...
 
 lint: ## Vet the module
