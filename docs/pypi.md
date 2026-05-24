@@ -38,10 +38,11 @@ A namespace with `mode: proxy` and `proxy.upstream` set (for example
   snapshot, then a minimal index synthesized from already cached files, and
   finally returns `503`. A clean upstream `404` returns `404`.
 - `GET /{namespace}/packages/{project}/{version}/{filename}` serves a cached file
-  if present, otherwise fetches it from upstream through open-artifact, verifies
-  the advertised `sha256` (mismatch → `502`), caches it, and serves it. The
-  namespace's proxy filter chain (`allow`/`deny`/`delay`) is evaluated on
-  downloads; a denied artifact returns `404`.
+  if present, otherwise fetches it from upstream through open-artifact, caches it,
+  and serves it. The namespace's proxy filter chain (`allow`/`deny`/`delay`) is
+  evaluated on downloads; a denied artifact returns `404`. The upstream-advertised
+  `sha256` is recorded and re-served in the index for clients to verify against,
+  but is not re-checked here (the hash and bytes share one upstream source).
 - `GET|HEAD /{namespace}/simple/` lists only locally cached projects, not the
   upstream's full registry listing.
 
@@ -68,8 +69,8 @@ cached files on the caller's behalf. Clients only ever read.
   remembered. The default is `30s`; `0` uses the default.
 - `--pypi-proxy-max-artifact-bytes` /
   `OPEN_ARTIFACT_PYPI_PROXY_MAX_ARTIFACT_BYTES`: cap on the buffered upstream
-  artifact during a proxy cache fill (bytes are buffered to verify the hash
-  before committing). The default is `1073741824` bytes; `0` uses the default.
+  artifact during a proxy cache fill, as a memory safety bound. The default is
+  `1073741824` bytes; `0` uses the default.
 
 Successful uploads invalidate only the affected project on the local process.
 Multi-replica deployments may serve stale project indexes until the TTL expires.

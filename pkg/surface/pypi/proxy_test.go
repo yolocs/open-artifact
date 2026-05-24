@@ -379,34 +379,6 @@ func TestProxyDownloadFileMissReturns404(t *testing.T) {
 	_ = readResp(t, resp)
 }
 
-func TestProxyHashMismatchReturns502(t *testing.T) {
-	t.Parallel()
-
-	// The index advertises a sha for the real bytes, but upstream serves
-	// different bytes for the file, so verification must fail.
-	wheel := upstreamFile{filename: "demo-1.0.0-py3-none-any.whl", body: []byte("correct")}
-	up := newFakeUpstream(t, "demo", []upstreamFile{wheel}, false)
-	// Keep the in-process index cache on so the cached index retains the
-	// original advertised sha while the upstream file server returns different
-	// bytes — the realistic "index hash does not match served bytes" mismatch.
-	h := newProxyHarness(t, memblob.OpenBucket(nil), pypi.Config{},
-		proxyNamespace("team-proxy", up.server.URL))
-
-	// Prime the index (records the correct sha), then corrupt the file bytes.
-	_ = readResp(t, get(t, h, "/team-proxy/simple/demo/", ""))
-	up.mu.Lock()
-	for i := range up.files {
-		up.files[i].body = []byte("tampered")
-	}
-	up.mu.Unlock()
-
-	resp := get(t, h, "/team-proxy/packages/demo/1.0.0/demo-1.0.0-py3-none-any.whl", "")
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502: %s", resp.StatusCode, readResp(t, resp))
-	}
-	_ = readResp(t, resp)
-}
-
 func TestProxyUploadReturns405(t *testing.T) {
 	t.Parallel()
 

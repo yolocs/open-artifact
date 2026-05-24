@@ -528,14 +528,17 @@ the configured base and appending the PyPI layout (`/simple/`,
   (`Ref{Package, Version, PublishedAt}`; a delay filter with an unknown publish
   time fetches the upstream per-release JSON, then fails closed if still
   unknown; a deny is logged and returned as `404`), fetches the bytes through
-  open-artifact (never redirecting clients to the public upstream), verifies the
-  advertised `sha256` before committing (mismatch → `502`), and tees the verified
-  bytes into the Store as a real `Package`/`Version`/`File` with PyPI annotations
-  (including `pypi:upstream_url`). A tee-to-store failure is logged but does not
-  fail the client response, since upstream delivered the bytes. `HEAD` answers
-  existence from index metadata without fetching or caching bytes. The buffered
-  upstream body is capped (default 1 GiB); verifying before committing is the
-  reason bytes are buffered rather than streamed.
+  open-artifact (never redirecting clients to the public upstream), and tees
+  them into the Store as a real `Package`/`Version`/`File` with PyPI annotations
+  (including `pypi:upstream_url` and the advertised `sha256`). A tee-to-store
+  failure is logged but does not fail the client response, since upstream
+  delivered the bytes. `HEAD` answers existence from index metadata without
+  fetching or caching bytes. We do **not** re-verify the bytes against the
+  index-advertised `sha256` — that hash comes from the same upstream as the
+  bytes, so it is no trust anchor here; it is recorded and re-served so clients
+  (pip) verify end to end, and the local `File`'s own digest is authoritative.
+  The upstream body is buffered through the shared upstream client, capped
+  (default 1 GiB) as a memory safety bound.
 
 The simple **root** (`/simple/`) in proxy mode lists only locally cached
 projects rather than proxying the upstream's full registry listing.

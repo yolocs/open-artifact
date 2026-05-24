@@ -3,8 +3,6 @@ package pypi
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -243,18 +241,13 @@ func (e *proxyEngine) download(w http.ResponseWriter, r *http.Request, ns string
 		return
 	}
 
-	if meta.SHA256 != "" {
-		sum := sha256.Sum256(resp.Body)
-		if got := hex.EncodeToString(sum[:]); !strings.EqualFold(got, meta.SHA256) {
-			logging.FromContext(r.Context()).Error("proxy artifact hash mismatch",
-				logging.KeyComponent, "pypi", "package", project, "version", version, "filename", filename)
-			surface.WriteError(w, http.StatusBadGateway, "upstream hash mismatch")
-			return
-		}
-	}
-
-	// Tee the verified bytes into the Store. A fill failure is logged but does
-	// not fail the client response — upstream delivered the bytes successfully.
+	// We do not verify the bytes against the index-advertised sha256: that hash
+	// comes from the same upstream as the bytes, so checking it here adds no
+	// trust. The hash is still recorded and re-served in our index so clients
+	// (pip) verify end to end. The local File's own digest is authoritative.
+	//
+	// Tee the bytes into the Store. A fill failure is logged but does not fail
+	// the client response — upstream delivered the bytes successfully.
 	e.fill(r.Context(), store, project, version, filename, meta, resp.Body)
 
 	w.Header().Set("Content-Type", "application/octet-stream")
