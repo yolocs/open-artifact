@@ -22,7 +22,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
-func TestRealPipDownloadAndInstall(t *testing.T) {
+func TestPipDownloadAndInstall(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)
@@ -66,7 +66,7 @@ func TestRealPipDownloadAndInstall(t *testing.T) {
 	runCmdEnv(t, pipEnv, "", venvPython, "-c", `import demo_pkg; assert demo_pkg.hello() == "ok"`)
 }
 
-func TestRealTwineUpload(t *testing.T) {
+func TestTwineUpload(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)
