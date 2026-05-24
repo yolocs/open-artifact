@@ -1,7 +1,7 @@
 # open-artifact convenience targets. The release pipeline runs goreleaser
 # via GitHub Actions; these are for local dev.
 
-.PHONY: build test test-integration lint tidy snapshot help
+.PHONY: build test test-integration test-e2e lint tidy snapshot help
 
 build: ## Build both binaries into ./bin
 	go build -o bin/open-artifact ./cmd/open-artifact
@@ -12,6 +12,9 @@ test: ## Run unit tests with the race detector
 
 test-integration: ## Run unit + integration tests (memblob/fileblob backends)
 	go test -race -tags=integration ./...
+
+test-e2e: ## Run real-client e2e tests (requires python3, pip, and twine)
+	go test -race -tags='integration e2e' -run 'TestReal' ./pkg/surface/pypi
 
 lint: ## Vet the module
 	go vet ./...

@@ -1,0 +1,26 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  real-clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+      - name: Install Python clients
+        run: python -m pip install --upgrade pip twine
+      - name: Run real-client tests
+        run: go test -race -tags='integration e2e' -run 'TestReal' ./pkg/surface/pypi
