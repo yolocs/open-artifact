@@ -13,9 +13,9 @@ import (
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
-// TestProxyLiveUpstreamPyPI is a smoke test against the real pypi.org. It needs
-// outbound network access, so it runs in its own CI step rather than the main
-// integration run, which excludes it with -skip. Run it locally with:
+// TestProxyLiveUpstreamPyPI is a smoke test against the real pypi.org, run as
+// part of the integration suite (integration tests hit real upstreams). Run it
+// locally with:
 //
 //	go test -tags=integration -run TestProxyLiveUpstreamPyPI ./pkg/surface/pypi
 //

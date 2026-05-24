@@ -21,7 +21,5 @@ jobs:
           python-version: "3.x"
       - name: Install Python clients
         run: python -m pip install --upgrade pip twine
-      - name: Run PyPI integration suite (hosted + proxy, real clients)
-        run: go test -race -tags=integration -skip '^TestProxyLiveUpstreamPyPI$' ./pkg/surface/pypi/...
-      - name: Run PyPI proxy live-upstream test (real pypi.org)
-        run: go test -race -tags=integration -run '^TestProxyLiveUpstreamPyPI$' ./pkg/surface/pypi
+      - name: Run PyPI integration tests (hosted, proxy, and live upstream)
+        run: go test -race -tags=integration ./pkg/surface/pypi/...
