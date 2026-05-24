@@ -28,7 +28,5 @@ jobs:
         run: go test -race -tags=integration -run '^TestPyPIHostedUpload$' ./pkg/surface/pypi
       - name: PyPI hosted - download (pip)
         run: go test -race -tags=integration -run '^TestPyPIHostedDownload$' ./pkg/surface/pypi
-      - name: PyPI proxy - download (pip, fake upstream)
-        run: go test -race -tags=integration -run '^TestPyPIProxyDownload$|^TestPyPIProxyDownloadRestart$' ./pkg/surface/pypi
-      - name: PyPI proxy - download (live pypi.org)
-        run: go test -race -tags=integration -run '^TestPyPIProxyDownloadLive$' ./pkg/surface/pypi
+      - name: PyPI proxy - download (pip, real pypi.org)
+        run: go test -race -tags=integration -run '^TestPyPIProxyDownload$' ./pkg/surface/pypi
