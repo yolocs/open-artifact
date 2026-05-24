@@ -21,5 +21,7 @@ jobs:
           python-version: "3.x"
       - name: Install Python clients
         run: python -m pip install --upgrade pip twine
-      - name: Run real-client tests
-        run: go test -race -tags=integration ./...
+      - name: Run pip download/install integration test
+        run: go test -race -tags=integration -run '^TestPipDownloadAndInstall$' ./pkg/surface/pypi
+      - name: Run twine upload integration test
+        run: go test -race -tags=integration -run '^TestTwineUpload$' ./pkg/surface/pypi

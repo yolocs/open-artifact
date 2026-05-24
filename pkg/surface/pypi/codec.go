@@ -137,6 +137,9 @@ func preferredSimpleResponse(header string) simpleResponse {
 		if err != nil {
 			return simpleResponseHTML
 		}
+		// In Accept headers, q=0 means the client explicitly refuses that
+		// media type. Other q values are treated as acceptable here; the first
+		// recognized acceptable format wins.
 		if params["q"] == "0" {
 			continue
 		}
