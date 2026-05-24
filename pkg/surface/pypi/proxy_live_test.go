@@ -1,4 +1,4 @@
-//go:build integration && pypiupstream
+//go:build integration
 
 package pypi_test
 
@@ -13,11 +13,11 @@ import (
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
-// TestProxyLiveUpstreamPyPI is a smoke test against the real pypi.org. It is
-// gated behind the pypiupstream build tag (in addition to integration) because
-// it requires outbound network access. Run it locally with:
+// TestProxyLiveUpstreamPyPI is a smoke test against the real pypi.org. It needs
+// outbound network access, so it runs in its own CI step rather than the main
+// integration run, which excludes it with -skip. Run it locally with:
 //
-//	go test -tags=integration,pypiupstream -run TestProxyLiveUpstreamPyPI ./pkg/surface/pypi
+//	go test -tags=integration -run TestProxyLiveUpstreamPyPI ./pkg/surface/pypi
 //
 // It installs a tiny, stable, pure-Python package through proxy mode against
 // real Warehouse output (exercising the actual PEP 503/691 parsing and link
