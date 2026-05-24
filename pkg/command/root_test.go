@@ -59,7 +59,6 @@ func TestServeDefaults(t *testing.T) {
 			SimpleIndexCacheTTL:   60 * time.Second,
 			ProxyIndexCacheTTL:    pypi.DefaultProxyIndexCacheTTL,
 			ProxyNegativeCacheTTL: pypi.DefaultProxyNegativeCacheTTL,
-			ProxyMaxArtifactBytes: pypi.DefaultProxyMaxArtifactBytes,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {

@@ -3,6 +3,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,55 @@ func TestGetSuccess(t *testing.T) {
 	}
 	if resp.CacheControl != "max-age=300" {
 		t.Fatalf("CacheControl = %q", resp.CacheControl)
+	}
+}
+
+func TestStreamSuccess(t *testing.T) {
+	t.Parallel()
+
+	// A body larger than the configured cap streams fine: Stream is uncapped.
+	want := strings.Repeat("x", 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(want))
+	}))
+	defer srv.Close()
+
+	c := New(WithHTTPClient(srv.Client()), WithMaxBodyBytes(16))
+	resp, err := c.Stream(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Stream() = %v", err)
+	}
+	defer resp.Body.Close()
+	if !resp.IsOK() {
+		t.Fatalf("IsOK() = false, status = %d", resp.Status)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("streamed %d bytes, want %d", len(got), len(want))
+	}
+}
+
+func TestStreamNotFoundCarriesBody(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := New(WithHTTPClient(srv.Client()))
+	resp, err := c.Stream(t.Context(), srv.URL)
+	if err != nil {
+		t.Fatalf("Stream() = %v", err)
+	}
+	defer resp.Body.Close()
+	if !resp.IsNotFound() {
+		t.Fatalf("IsNotFound() = false, status = %d", resp.Status)
 	}
 }
 

@@ -31,12 +31,11 @@ const DefaultMaxUploadBytes int64 = 100 << 20
 
 // Proxy-mode defaults. The index cache is the in-process burst absorber in
 // front of the durable upstream-index snapshot; the negative TTL bounds how long
-// an upstream 404 is remembered; the artifact cap bounds the buffered upstream
-// body during a cold cache fill.
+// an upstream 404 is remembered. Artifact bytes are streamed straight through
+// (tee-to-store), so there is no artifact buffer to cap.
 const (
-	DefaultProxyIndexCacheTTL          = 10 * time.Second
-	DefaultProxyNegativeCacheTTL       = 30 * time.Second
-	DefaultProxyMaxArtifactBytes int64 = 1 << 30
+	DefaultProxyIndexCacheTTL    = 10 * time.Second
+	DefaultProxyNegativeCacheTTL = 30 * time.Second
 )
 
 type Config struct {
@@ -46,7 +45,6 @@ type Config struct {
 	// Proxy-mode knobs. A zero value falls back to the matching Default above.
 	ProxyIndexCacheTTL    time.Duration
 	ProxyNegativeCacheTTL time.Duration
-	ProxyMaxArtifactBytes int64
 }
 
 func (c Config) uploadLimit() int64 {
@@ -54,13 +52,6 @@ func (c Config) uploadLimit() int64 {
 		return DefaultMaxUploadBytes
 	}
 	return c.MaxUploadBytes
-}
-
-func (c Config) proxyMaxArtifactBytes() int64 {
-	if c.ProxyMaxArtifactBytes <= 0 {
-		return DefaultProxyMaxArtifactBytes
-	}
-	return c.ProxyMaxArtifactBytes
 }
 
 // proxyIndexCacheTTL resolves the in-process rendered-index cache TTL: zero

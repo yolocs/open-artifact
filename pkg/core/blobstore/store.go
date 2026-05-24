@@ -535,7 +535,15 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 		}
 	}
 
-	w, err := s.bNewWriter(ctx, blobKey, nil)
+	// The blob writer is created under a child context we can cancel. On a
+	// mid-stream error, calling Close alone would commit the bytes written so
+	// far as a complete object (true for memblob/fileblob); cancelling the
+	// writer's context before Close aborts the upload so no partial, servable
+	// blob is left behind. This matters for streaming callers (a proxy cache
+	// fill, a disconnected upload) where the body can end early.
+	wctx, cancelWrite := context.WithCancel(ctx)
+	defer cancelWrite()
+	w, err := s.bNewWriter(wctx, blobKey, nil)
 	if err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: open writer %q: %w", blobKey, mapErr(err))
 	}
@@ -543,6 +551,7 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
 		// Abort the in-flight write so no partial blob is committed.
+		cancelWrite()
 		_ = s.closeWriter(w)
 		return core.Meta{}, fmt.Errorf("blobstore: stream %q: %w", blobKey, mapErr(err))
 	}

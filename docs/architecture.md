@@ -527,18 +527,19 @@ the configured base and appending the PyPI layout (`/simple/`,
   upstream URL from the cached index, evaluates the namespace filter chain
   (`Ref{Package, Version, PublishedAt}`; a delay filter with an unknown publish
   time fetches the upstream per-release JSON, then fails closed if still
-  unknown; a deny is logged and returned as `404`), fetches the bytes through
-  open-artifact (never redirecting clients to the public upstream), and tees
-  them into the Store as a real `Package`/`Version`/`File` with PyPI annotations
-  (including `pypi:upstream_url` and the advertised `sha256`). A tee-to-store
-  failure is logged but does not fail the client response, since upstream
-  delivered the bytes. `HEAD` answers existence from index metadata without
-  fetching or caching bytes. We do **not** re-verify the bytes against the
-  index-advertised `sha256` — that hash comes from the same upstream as the
-  bytes, so it is no trust anchor here; it is recorded and re-served so clients
-  (pip) verify end to end, and the local `File`'s own digest is authoritative.
-  The upstream body is buffered through the shared upstream client, capped
-  (default 1 GiB) as a memory safety bound.
+  unknown; a deny is logged and returned as `404`), then **streams** the bytes
+  through open-artifact (never redirecting clients to the public upstream) with
+  a **tee into the Store** as a real `Package`/`Version`/`File` — no
+  full-artifact buffering. The client is the primary consumer: a Store-write
+  failure is swallowed so it cannot truncate the client response (governed by
+  upstream stream success), and is logged. If the client disconnects (or
+  upstream ends early), the Store write aborts cleanly — `blobstore` cancels the
+  in-flight blob write so no truncated, servable `File` is committed to poison
+  the cache; the next request refills. `HEAD` answers existence from index
+  metadata without fetching or caching bytes. We do **not** verify the bytes
+  against the index-advertised `sha256` — that hash shares the upstream's trust
+  — but record it (`pypi:upstream_url`, `sha256`) and re-serve it so clients
+  (pip) verify end to end; the local `File`'s own digest is authoritative.
 
 The simple **root** (`/simple/`) in proxy mode lists only locally cached
 projects rather than proxying the upstream's full registry listing.
@@ -552,7 +553,12 @@ projects rather than proxying the upstream's full registry listing.
 - The command owns bucket lifecycle: open once at startup, close on shutdown.
   `blobstore.Store` must not close a caller-owned bucket.
 - Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path;
-  write the `.meta.<file>` sidecar after the writer closes successfully.
+  write the `.meta.<file>` sidecar after the writer closes successfully. The
+  writer is created under a cancelable child context; on a mid-stream read error
+  the write is **cancelled** before `Close` (for memblob/fileblob a plain
+  `Close` would commit the bytes written so far as a complete object), so a body
+  that ends early — a disconnected upload, an interrupted proxy stream — never
+  leaves a partial, servable blob.
 - `File.DownloadURL` wraps `bucket.SignedURL` behind a mandatory,
   facade-transparent LRU + singleflight cache with per-cloud TTL parsing.
   memblob/fileblob return no signed URL → cache the miss and return an empty

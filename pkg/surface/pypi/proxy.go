@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,21 +41,19 @@ var errUpstreamUnavailable = errors.New("pypi: upstream unavailable")
 // bytes are handled differently: they are cached on first pull as real Files and
 // served from our storage thereafter (see download).
 type proxyEngine struct {
-	now       func() time.Time
-	httpc     *httpclient.Client
-	artifactc *httpclient.Client
-	neg       *negcache.Cache
-	mem       *indexMemo
-	sfIndex   singleflight.Group[*proxyIndex]
+	now     func() time.Time
+	httpc   *httpclient.Client
+	neg     *negcache.Cache
+	mem     *indexMemo
+	sfIndex singleflight.Group[*proxyIndex]
 }
 
 func newProxyEngine(cfg Config, now func() time.Time) *proxyEngine {
 	return &proxyEngine{
-		now:       now,
-		httpc:     httpclient.New(),
-		artifactc: httpclient.New(httpclient.WithMaxBodyBytes(cfg.proxyMaxArtifactBytes())),
-		neg:       negcache.New(cfg.ProxyNegativeCacheTTL),
-		mem:       newIndexMemo(cfg.proxyIndexCacheTTL(), now),
+		now:   now,
+		httpc: httpclient.New(),
+		neg:   negcache.New(cfg.ProxyNegativeCacheTTL),
+		mem:   newIndexMemo(cfg.proxyIndexCacheTTL(), now),
 	}
 }
 
@@ -222,37 +221,121 @@ func (e *proxyEngine) download(w http.ResponseWriter, r *http.Request, ns string
 		return
 	}
 
-	resp, err := e.artifactc.Get(r.Context(), meta.UpstreamURL)
+	sr, err := e.httpc.Stream(r.Context(), meta.UpstreamURL)
 	if err != nil {
 		logging.FromContext(r.Context()).Error("proxy artifact fetch failed",
 			logging.KeyComponent, "pypi", logging.KeyError, err)
 		surface.WriteError(w, http.StatusBadGateway, "upstream fetch failed")
 		return
 	}
+	defer sr.Body.Close()
 	switch {
-	case resp.IsNotFound():
+	case sr.IsNotFound():
 		e.neg.Mark(ns, pypiFormat, fileKey(project, version, filename))
 		surface.WriteStoreError(w, r, core.ErrNotFound)
 		return
-	case !resp.IsOK():
+	case !sr.IsOK():
 		logging.FromContext(r.Context()).Error("proxy artifact upstream status",
-			logging.KeyComponent, "pypi", "status", resp.Status)
+			logging.KeyComponent, "pypi", "status", sr.Status)
 		surface.WriteError(w, http.StatusBadGateway, "upstream unavailable")
 		return
 	}
 
-	// We do not verify the bytes against the index-advertised sha256: that hash
-	// comes from the same upstream as the bytes, so checking it here adds no
-	// trust. The hash is still recorded and re-served in our index so clients
-	// (pip) verify end to end. The local File's own digest is authoritative.
-	//
-	// Tee the bytes into the Store. A fill failure is logged but does not fail
-	// the client response — upstream delivered the bytes successfully.
-	e.fill(r.Context(), store, project, version, filename, meta, resp.Body)
+	e.streamAndCache(w, r, store, project, version, filename, meta, sr)
+}
+
+// streamAndCache streams the upstream artifact straight to the client while
+// teeing the same bytes into the Store as a real File — no full-artifact
+// buffering. The client is the primary consumer: a Store write failure is
+// swallowed so it cannot truncate the client (the response is governed by
+// upstream stream success). Conversely, if the client disconnects, the Store
+// write aborts cleanly (blobstore cancels the partial write), so no truncated
+// File is left to poison the cache. We do not verify the index-advertised
+// sha256 here — it shares the upstream's trust — but record it for clients to
+// verify end to end; the local File's own digest is authoritative.
+func (e *proxyEngine) streamAndCache(w http.ResponseWriter, r *http.Request, store core.Store, project, version, filename string, meta proxyFileMeta, sr *httpclient.StreamResponse) {
+	ctx := r.Context()
+
+	pr, pw := io.Pipe()
+	fillDone := make(chan error, 1)
+	go func() {
+		ann := proxyFileAnnotations(project, version, filename, meta, e.now().UTC())
+		_, err := store.Package(project).Version(version).AddFile(ctx, filename, pr, core.WithAnnotations(ann))
+		// Unblock the writer side: once AddFile stops reading (success or
+		// failure), further tee writes must not deadlock — they return this err
+		// and are swallowed by storeTee.
+		_ = pr.CloseWithError(err)
+		fillDone <- err
+	}()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
+	if sr.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(sr.ContentLength, 10))
+	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(resp.Body)
+
+	tee := &storeTee{w: pw}
+	_, copyErr := io.Copy(w, io.TeeReader(sr.Body, tee))
+	// Signal end-of-stream to the Store writer: clean EOF on success, the error
+	// otherwise so the partial write aborts rather than committing.
+	if copyErr != nil {
+		_ = pw.CloseWithError(copyErr)
+	} else {
+		_ = pw.Close()
+	}
+
+	fillErr := <-fillDone
+	switch {
+	case copyErr != nil:
+		// The client read failed mid-stream (disconnect) or upstream ended early.
+		// The Store write aborts with it; nothing servable is committed.
+		logging.FromContext(ctx).Warn("proxy artifact stream interrupted",
+			logging.KeyComponent, "pypi", "package", project, "version", version,
+			"filename", filename, logging.KeyError, copyErr)
+	case fillErr != nil:
+		// Upstream fully delivered to the client, but caching failed. Log and
+		// move on — the next request will refill.
+		logging.FromContext(ctx).Warn("proxy cache fill failed",
+			logging.KeyComponent, "pypi", "package", project, "version", version,
+			"filename", filename, logging.KeyError, fillErr)
+	default:
+		// Cached successfully; record the package/version envelopes for parity
+		// with hosted uploads (best-effort, metadata only).
+		e.recordParents(ctx, store, project, version)
+	}
+}
+
+// storeTee forwards bytes to the Store pipe but never propagates a write error
+// back to the TeeReader, so a Store-side failure cannot truncate the client
+// stream. The pipe is closed with the error by the AddFile goroutine; subsequent
+// writes here return that error and are swallowed.
+type storeTee struct {
+	w      io.Writer
+	failed bool
+}
+
+func (t *storeTee) Write(p []byte) (int, error) {
+	if t.failed {
+		return len(p), nil
+	}
+	if _, err := t.w.Write(p); err != nil {
+		t.failed = true
+	}
+	return len(p), nil
+}
+
+// recordParents writes the package and version metadata envelopes after a
+// successful fill, mirroring the hosted upload annotations. Best-effort.
+func (e *proxyEngine) recordParents(ctx context.Context, store core.Store, project, version string) {
+	if _, err := store.AddPackage(ctx, project, core.WithAnnotations(map[string]any{"pypi:name": project})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
+		logging.FromContext(ctx).Warn("proxy cache fill add package failed",
+			logging.KeyComponent, "pypi", logging.KeyError, err)
+		return
+	}
+	if _, err := store.Package(project).AddVersion(ctx, version, core.WithAnnotations(map[string]any{"pypi:version": version})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
+		logging.FromContext(ctx).Warn("proxy cache fill add version failed",
+			logging.KeyComponent, "pypi", logging.KeyError, err)
+	}
 }
 
 // fetchIndex returns the upstream index for project through the two-level cache:
@@ -442,28 +525,6 @@ func (e *proxyEngine) resolveUploadTime(ctx context.Context, spec namespace.Spec
 		}
 	}
 	return nil
-}
-
-// fill tees verified upstream bytes into the Store as a real Package/Version/
-// File so the artifact is served locally thereafter and the project becomes
-// indexable. It is best-effort: every step is logged on failure but does not
-// fail the client response, since upstream already delivered the bytes.
-func (e *proxyEngine) fill(ctx context.Context, store core.Store, project, version, filename string, meta proxyFileMeta, body []byte) {
-	if _, err := store.AddPackage(ctx, project, core.WithAnnotations(map[string]any{"pypi:name": project})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
-		logging.FromContext(ctx).Warn("proxy cache fill add package failed",
-			logging.KeyComponent, "pypi", logging.KeyError, err)
-		return
-	}
-	if _, err := store.Package(project).AddVersion(ctx, version, core.WithAnnotations(map[string]any{"pypi:version": version})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
-		logging.FromContext(ctx).Warn("proxy cache fill add version failed",
-			logging.KeyComponent, "pypi", logging.KeyError, err)
-		return
-	}
-	ann := proxyFileAnnotations(project, version, filename, meta, e.now().UTC())
-	if _, err := store.Package(project).Version(version).AddFile(ctx, filename, bytes.NewReader(body), core.WithAnnotations(ann)); err != nil {
-		logging.FromContext(ctx).Warn("proxy cache fill add file failed",
-			logging.KeyComponent, "pypi", logging.KeyError, err)
-	}
 }
 
 func (e *proxyEngine) writeIndexError(w http.ResponseWriter, r *http.Request, err error) {

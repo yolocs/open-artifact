@@ -68,6 +68,54 @@ func sha256Hex(b []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// failAfterReader yields n bytes then fails, simulating a body whose source
+// (an upstream stream, a disconnected client) errors mid-transfer.
+type failAfterReader struct {
+	data []byte
+	pos  int
+	at   int
+}
+
+func (r *failAfterReader) Read(p []byte) (int, error) {
+	if r.pos >= r.at {
+		return 0, errors.New("mid-stream failure")
+	}
+	n := copy(p, r.data[r.pos:r.at])
+	r.pos += n
+	return n, nil
+}
+
+// TestAddFileMidStreamErrorLeavesNoPartialBlob proves that a body that errors
+// part-way through does not leave a partial, servable File: AddFile reports the
+// error and the File must not exist afterward. Without aborting the writer this
+// regresses to a poisoned cache entry (Exists true, Read returns truncated bytes
+// because the sidecar never landed and verification is then skipped).
+func TestAddFileMidStreamErrorLeavesNoPartialBlob(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		s, err := NewWithBucket(b, testScope)
+		if err != nil {
+			t.Fatalf("NewWithBucket: %v", err)
+		}
+		body := &failAfterReader{data: []byte("0123456789abcdefghij"), at: 5}
+		v := s.Package("demo").Version("1.0.0")
+		if _, err := v.AddFile(ctx, "demo-1.0.0-py3-none-any.whl", body); err == nil {
+			t.Fatal("AddFile succeeded on a mid-stream error, want failure")
+		}
+
+		f := v.File("demo-1.0.0-py3-none-any.whl")
+		exists, err := f.Exists(ctx)
+		if err != nil {
+			t.Fatalf("Exists: %v", err)
+		}
+		if exists {
+			t.Fatal("partial blob left after mid-stream error: File.Exists = true, want false")
+		}
+	})
+}
+
 func TestAddFileReadFileRoundTrip(t *testing.T) {
 	t.Parallel()
 

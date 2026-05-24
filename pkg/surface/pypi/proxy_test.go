@@ -1,13 +1,16 @@
 package pypi_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,13 +46,14 @@ type fakeUpstream struct {
 	server  *httptest.Server
 	project string
 
-	mu           sync.Mutex
-	files        []upstreamFile
-	useJSON      bool
-	simpleStatus int            // 0 => 200
-	fileStatus   map[string]int // filename => override status
-	releaseJSON  map[string]string
-	simpleHits   int
+	mu            sync.Mutex
+	files         []upstreamFile
+	useJSON       bool
+	simpleStatus  int            // 0 => 200
+	fileStatus    map[string]int // filename => override status
+	truncateFiles bool           // declare a larger Content-Length than is written
+	releaseJSON   map[string]string
+	simpleHits    int
 }
 
 func newFakeUpstream(t *testing.T, project string, files []upstreamFile, useJSON bool) *fakeUpstream {
@@ -91,6 +95,14 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, uf := range f.files {
 			if uf.filename == name {
+				if f.truncateFiles {
+					// Promise more than we deliver, then return: the server
+					// closes the connection abruptly and the reader sees a
+					// short/interrupted body.
+					w.Header().Set("Content-Length", strconv.Itoa(len(uf.body)+1024))
+					_, _ = w.Write(uf.body)
+					return
+				}
 				_, _ = w.Write(uf.body)
 				return
 			}
@@ -360,6 +372,79 @@ func TestProxySynthesizedIndexFallback(t *testing.T) {
 	}
 	if body := readResp(t, resp); !strings.Contains(body, "demo-1.0.0-py3-none-any.whl") {
 		t.Fatalf("synthesized index missing local file: %s", body)
+	}
+}
+
+func TestProxyDownloadStreamsLargeBodyAndCaches(t *testing.T) {
+	t.Parallel()
+
+	// A body well over io.Copy's 32 KiB chunk exercises the multi-chunk
+	// streaming tee (upstream -> client, teed -> Store) without buffering.
+	body := bytes.Repeat([]byte("abcdefghij"), 30000) // 300 KiB
+	wheel := upstreamFile{filename: "demo-1.0.0-py3-none-any.whl", body: body}
+	up := newFakeUpstream(t, "demo", []upstreamFile{wheel}, false)
+	h := newProxyHarness(t, memblob.OpenBucket(nil), pypi.Config{},
+		proxyNamespace("team-proxy", up.server.URL))
+
+	url := "/team-proxy/packages/demo/1.0.0/demo-1.0.0-py3-none-any.whl"
+	dl := get(t, h, url, "")
+	if dl.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d: %s", dl.StatusCode, readResp(t, dl))
+	}
+	if got := []byte(readResp(t, dl)); !bytes.Equal(got, body) {
+		t.Fatalf("streamed body = %d bytes, want %d", len(got), len(body))
+	}
+
+	// Served from the local cache afterward, even with upstream refusing.
+	up.mu.Lock()
+	up.fileStatus[wheel.filename] = http.StatusInternalServerError
+	up.mu.Unlock()
+	again := get(t, h, url, "")
+	if again.StatusCode != http.StatusOK {
+		t.Fatalf("cached download status = %d: %s", again.StatusCode, readResp(t, again))
+	}
+	if got := []byte(readResp(t, again)); !bytes.Equal(got, body) {
+		t.Fatalf("cached body = %d bytes, want %d", len(got), len(body))
+	}
+}
+
+func TestProxyUpstreamTruncationDoesNotPoisonCache(t *testing.T) {
+	t.Parallel()
+
+	body := bytes.Repeat([]byte("z"), 50000)
+	wheel := upstreamFile{filename: "demo-1.0.0-py3-none-any.whl", body: body}
+	up := newFakeUpstream(t, "demo", []upstreamFile{wheel}, false)
+	up.mu.Lock()
+	up.truncateFiles = true
+	up.mu.Unlock()
+	h := newProxyHarness(t, memblob.OpenBucket(nil), pypi.Config{},
+		proxyNamespace("team-proxy", up.server.URL))
+
+	url := "/team-proxy/packages/demo/1.0.0/demo-1.0.0-py3-none-any.whl"
+	// First attempt: upstream truncates mid-stream. The client read fails or is
+	// short; what matters is that nothing partial is committed to the cache.
+	resp := get(t, h, url, "")
+	if resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		if _, err := io.ReadAll(resp.Body); err == nil {
+			t.Fatal("expected a truncated/interrupted body on the first attempt")
+		}
+	} else {
+		_ = readResp(t, resp)
+	}
+
+	// Upstream recovers; the second request must fetch and serve the FULL bytes.
+	// If the truncated first attempt had poisoned the cache, this would serve the
+	// partial blob from local storage instead.
+	up.mu.Lock()
+	up.truncateFiles = false
+	up.mu.Unlock()
+	ok := get(t, h, url, "")
+	if ok.StatusCode != http.StatusOK {
+		t.Fatalf("recovery download status = %d: %s", ok.StatusCode, readResp(t, ok))
+	}
+	if got := []byte(readResp(t, ok)); !bytes.Equal(got, body) {
+		t.Fatalf("recovery body = %d bytes, want %d (cache was poisoned with a partial file)", len(got), len(body))
 	}
 }
 

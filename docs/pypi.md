@@ -38,11 +38,14 @@ A namespace with `mode: proxy` and `proxy.upstream` set (for example
   snapshot, then a minimal index synthesized from already cached files, and
   finally returns `503`. A clean upstream `404` returns `404`.
 - `GET /{namespace}/packages/{project}/{version}/{filename}` serves a cached file
-  if present, otherwise fetches it from upstream through open-artifact, caches it,
-  and serves it. The namespace's proxy filter chain (`allow`/`deny`/`delay`) is
-  evaluated on downloads; a denied artifact returns `404`. The upstream-advertised
-  `sha256` is recorded and re-served in the index for clients to verify against,
-  but is not re-checked here (the hash and bytes share one upstream source).
+  if present, otherwise streams it from upstream through open-artifact straight to
+  the client while teeing the same bytes into storage (no buffering). The
+  namespace's proxy filter chain (`allow`/`deny`/`delay`) is evaluated on
+  downloads; a denied artifact returns `404`. The upstream-advertised `sha256` is
+  recorded and re-served in the index for clients to verify against, but is not
+  re-checked here (the hash and bytes share one upstream source). An interrupted
+  stream (client disconnect or upstream failure) does not leave a partial cached
+  file; the next request refetches.
 - `GET|HEAD /{namespace}/simple/` lists only locally cached projects, not the
   upstream's full registry listing.
 
@@ -67,10 +70,6 @@ cached files on the caller's behalf. Clients only ever read.
 - `--pypi-proxy-negative-cache-ttl` /
   `OPEN_ARTIFACT_PYPI_PROXY_NEGATIVE_CACHE_TTL`: how long an upstream `404` is
   remembered. The default is `30s`; `0` uses the default.
-- `--pypi-proxy-max-artifact-bytes` /
-  `OPEN_ARTIFACT_PYPI_PROXY_MAX_ARTIFACT_BYTES`: cap on the buffered upstream
-  artifact during a proxy cache fill, as a memory safety bound. The default is
-  `1073741824` bytes; `0` uses the default.
 
 Successful uploads invalidate only the affected project on the local process.
 Multi-replica deployments may serve stale project indexes until the TTL expires.
