@@ -7,11 +7,11 @@ import (
 	"github.com/spf13/cobra"
 	"gocloud.dev/blob"
 
+	"github.com/yolocs/open-artifact/pkg/admin"
 	"github.com/yolocs/open-artifact/pkg/logging"
 	"github.com/yolocs/open-artifact/pkg/metrics"
 	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/observability"
-	"github.com/yolocs/open-artifact/pkg/surface/admin"
 )
 
 // newAdminCommand builds the `admin` parent command and its subcommands.
