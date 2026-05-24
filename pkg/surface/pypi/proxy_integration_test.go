@@ -16,11 +16,11 @@ import (
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
-// TestProxyCachedFilesSurviveRestart proves that artifacts pulled through a
-// proxy namespace are durable: after a simulated process restart (a fresh
-// bucket handle, registry, and handler over the same file:// directory) with
-// the upstream unavailable, a previously cached file still serves.
-func TestProxyCachedFilesSurviveRestart(t *testing.T) {
+// TestPyPIProxyDownloadRestart proves that artifacts pulled through a proxy
+// namespace are durable: after a simulated process restart (a fresh bucket
+// handle, registry, and handler over the same file:// directory) with the
+// upstream unavailable, a previously cached file still serves.
+func TestPyPIProxyDownloadRestart(t *testing.T) {
 	t.Parallel()
 
 	wheel := upstreamFile{filename: "demo-1.0.0-py3-none-any.whl", body: []byte("durable wheel bytes")}
@@ -68,11 +68,11 @@ func TestProxyCachedFilesSurviveRestart(t *testing.T) {
 	}
 }
 
-// TestPipInstallThroughProxy drives a real pip client through a proxy namespace
+// TestPyPIProxyDownload drives a real pip client through a proxy namespace
 // backed by an in-process fake PyPI upstream: the first install pulls the wheel
 // through and caches it; the second install succeeds with the upstream
 // unavailable because the file is cached.
-func TestPipInstallThroughProxy(t *testing.T) {
+func TestPyPIProxyDownload(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)

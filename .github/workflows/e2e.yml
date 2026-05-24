@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+# One integration workflow. Each scenario (surface x hosted/proxy x client use
+# case) is its own step so a failure points straight at the broken scenario.
+# Integration tests hit real clients and real upstreams by definition.
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -21,5 +24,11 @@ jobs:
           python-version: "3.x"
       - name: Install Python clients
         run: python -m pip install --upgrade pip twine
-      - name: Run PyPI integration tests (hosted, proxy, and live upstream)
-        run: go test -race -tags=integration ./pkg/surface/pypi/...
+      - name: PyPI hosted - upload (twine)
+        run: go test -race -tags=integration -run '^TestPyPIHostedUpload$' ./pkg/surface/pypi
+      - name: PyPI hosted - download (pip)
+        run: go test -race -tags=integration -run '^TestPyPIHostedDownload$' ./pkg/surface/pypi
+      - name: PyPI proxy - download (pip, fake upstream)
+        run: go test -race -tags=integration -run '^TestPyPIProxyDownload$|^TestPyPIProxyDownloadRestart$' ./pkg/surface/pypi
+      - name: PyPI proxy - download (live pypi.org)
+        run: go test -race -tags=integration -run '^TestPyPIProxyDownloadLive$' ./pkg/surface/pypi

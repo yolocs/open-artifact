@@ -13,17 +13,17 @@ import (
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
-// TestProxyLiveUpstreamPyPI is a smoke test against the real pypi.org, run as
+// TestPyPIProxyDownloadLive is a smoke test against the real pypi.org, run as
 // part of the integration suite (integration tests hit real upstreams). Run it
 // locally with:
 //
-//	go test -tags=integration -run TestProxyLiveUpstreamPyPI ./pkg/surface/pypi
+//	go test -tags=integration -run TestPyPIProxyDownloadLive ./pkg/surface/pypi
 //
 // It installs a tiny, stable, pure-Python package through proxy mode against
 // real Warehouse output (exercising the actual PEP 503/691 parsing and link
 // rewriting), then proves the artifact was cached locally and a second install
 // is served from cache.
-func TestProxyLiveUpstreamPyPI(t *testing.T) {
+func TestPyPIProxyDownloadLive(t *testing.T) {
 	t.Parallel()
 
 	python := requirePython(t)
