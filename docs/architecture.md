@@ -107,6 +107,7 @@ internal/
   version/           ← single source of build identity
 pkg/
   command/           ← cobra/viper command tree, config resolution + validation
+  admin/             ← namespace CRUD HTTP API (format-agnostic control plane)
   bucket/            ← command-layer bucket opener; registers Go CDK blob drivers
   serving/           ← shared HTTP server lifecycle (graceful shutdown) + logger middleware
   core/              ← data nouns, Format enum, Store/Cache interfaces, Meta, sentinel errors
@@ -124,7 +125,6 @@ pkg/
     singleflight/    ← typed cold-fill coalescer
     filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
-    admin/           ← namespace CRUD HTTP API
     pypi/            ← PEP 503/691 hosted (proxy planned)
     npm/             ← npm registry hosted + proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
@@ -283,7 +283,7 @@ attributes.
   `<ns>/<fmt>` and whose `Spec(ctx)` resolves the namespace spec live — admin
   changes are visible without restart, and an unknown namespace maps to
   `ErrNotFound`.
-- **Admin API** (`/admin/v1/namespaces/...`, `pkg/surface/admin`) is the only
+- **Admin API** (`/admin/v1/namespaces/...`, `pkg/admin`) is the only
   writer of namespace metadata: `PUT` (201 create / 200 update), `GET`,
   `DELETE` (204; 409 when non-empty), and `GET` list. Errors use
   `{"error":"…"}` and map invalid name/spec/schema → 400, missing → 404,
