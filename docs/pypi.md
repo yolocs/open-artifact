@@ -31,9 +31,12 @@ A namespace with `mode: proxy` and `proxy.upstream` set (for example
 - Uploads (`POST`/`PUT`) return `405 Method Not Allowed` with `Allow: GET, HEAD`.
 - `GET|HEAD /{namespace}/simple/{project}/` serves the upstream simple index,
   rewriting file links back through open-artifact. The index is parsed from
-  PEP 691 JSON or PEP 503 HTML and cached; if upstream is unavailable the surface
-  serves a stale cached index, then a minimal index synthesized from already
-  cached files, and finally returns `503`. A clean upstream `404` returns `404`.
+  PEP 691 JSON or PEP 503 HTML. Caching is two-level: a short in-process cache
+  absorbs bursts, and a durable snapshot is kept for when upstream is down. While
+  upstream is reachable the snapshot is refreshed (write-through) but the response
+  comes from upstream; if upstream is unavailable the surface serves the durable
+  snapshot, then a minimal index synthesized from already cached files, and
+  finally returns `503`. A clean upstream `404` returns `404`.
 - `GET /{namespace}/packages/{project}/{version}/{filename}` serves a cached file
   if present, otherwise fetches it from upstream through open-artifact, verifies
   the advertised `sha256` (mismatch → `502`), caches it, and serves it. The
@@ -55,12 +58,11 @@ cached files on the caller's behalf. Clients only ever read.
   project simple indexes (both hosted and proxy). The default is `60s`; `0`
   disables caching.
 - `--pypi-proxy-index-cache-ttl` /
-  `OPEN_ARTIFACT_PYPI_PROXY_INDEX_CACHE_TTL`: per-process cache TTL for the
-  rendered proxy simple index. The default is `10s`; `0` uses the default, a
-  negative value disables it.
-- `--pypi-proxy-metadata-ttl` / `OPEN_ARTIFACT_PYPI_PROXY_METADATA_TTL`:
-  freshness window for the blob-backed cached upstream simple index. The default
-  is `10m`; `0` uses the default.
+  `OPEN_ARTIFACT_PYPI_PROXY_INDEX_CACHE_TTL`: in-process cache TTL for the proxy
+  upstream index (the burst absorber). The default is `10s`; `0` uses the
+  default, a negative value disables it. The durable upstream-index snapshot has
+  no TTL — it is overwritten on every successful refresh and read only as a
+  fallback when upstream is unavailable.
 - `--pypi-proxy-negative-cache-ttl` /
   `OPEN_ARTIFACT_PYPI_PROXY_NEGATIVE_CACHE_TTL`: how long an upstream `404` is
   remembered. The default is `30s`; `0` uses the default.

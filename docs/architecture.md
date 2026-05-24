@@ -506,20 +506,22 @@ the cache, filling from upstream on a miss. Upstream URLs are built by trimming
 the configured base and appending the PyPI layout (`/simple/`,
 `/simple/<project>/`, and `/pypi/<project>/<version>/json` for delay metadata).
 
-- **Project index** (`/simple/<project>/`) is resolved through three layers: the
-  process-local rendered-page cache (default 10s), then the blob-backed metadata
-  cache keyed `pypi:simple:<project>` (fresh within a default 10m window via
-  `Meta.UpdatedAt`), then an upstream fetch coalesced per `(namespace, project)`
-  with singleflight. The upstream document is parsed as PEP 691 JSON or PEP 503
-  HTML (chosen by response content type), distilled to a canonical
-  `{filename, upstream_url, sha256, requires-python, version, upload-time}` per
-  file (relative links resolved against the simple URL, version derived from the
-  filename), and stored in the metadata cache. File links are rewritten back
+- **Project index** (`/simple/<project>/`) uses a two-level cache. An in-process
+  memo (default 10s) absorbs bursts. On a memo miss the surface goes to upstream
+  — coalesced per `(namespace, project)` with singleflight — parses the document
+  as PEP 691 JSON or PEP 503 HTML (chosen by response content type), distills it
+  to a canonical `{filename, upstream_url, sha256, requires-python, version,
+  upload-time}` per file (relative links resolved against the simple URL, version
+  derived from the filename), and **write-through**s that snapshot to the durable
+  `.cache/` entry keyed `pypi:simple:<project>`. File links are rewritten back
   through open-artifact when rendered, and the response is HTML or PEP 691 JSON
-  by the same `Accept` negotiation as hosted. On an upstream refresh failure the
-  surface serves a stale cached index, else synthesizes a minimal index from
-  locally cached files, else returns `503`. A clean upstream `404` is remembered
-  in the negative cache (default 30s) and returned as `404`.
+  by the same `Accept` negotiation as hosted. The durable snapshot is **read only
+  when upstream is unavailable** (so while upstream is reachable it is written but
+  never served): on a refresh failure the surface serves the durable snapshot at
+  any age, else a minimal index synthesized from locally cached files, else
+  returns `503`. A clean upstream `404` is remembered in the negative cache
+  (default 30s) and returned as `404`. Artifact bytes are cached differently —
+  always pulled on first request and served from our storage thereafter.
 - **File download** (`/packages/<project>/<version>/<filename>`) serves the
   local `File` when present (exactly like hosted). On a miss it resolves the
   upstream URL from the cached index, evaluates the namespace filter chain

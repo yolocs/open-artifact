@@ -58,7 +58,6 @@ func TestServeDefaults(t *testing.T) {
 			MaxUploadBytes:        pypi.DefaultMaxUploadBytes,
 			SimpleIndexCacheTTL:   60 * time.Second,
 			ProxyIndexCacheTTL:    pypi.DefaultProxyIndexCacheTTL,
-			ProxyMetadataTTL:      pypi.DefaultProxyMetadataTTL,
 			ProxyNegativeCacheTTL: pypi.DefaultProxyNegativeCacheTTL,
 			ProxyMaxArtifactBytes: pypi.DefaultProxyMaxArtifactBytes,
 		},

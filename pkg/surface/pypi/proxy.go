@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -30,30 +31,73 @@ import (
 // synthesized fallback was available. It maps to 503.
 var errUpstreamUnavailable = errors.New("pypi: upstream unavailable")
 
-// proxyEngine holds the pull-through machinery for proxy-mode PyPI namespaces:
-// the upstream clients, the in-process rendered-index cache, the negative cache,
-// and the cold-fill coalescer. The durable metadata cache and artifact bytes
-// live on the namespace's core.Store (.cache/ entries and real Files); this
-// engine only adds the process-local pieces in front of it.
+// proxyEngine holds the pull-through machinery for proxy-mode PyPI namespaces.
+//
+// Index/metadata caching is two-level. An in-process memo (mem) absorbs bursty
+// requests for a short TTL. Behind it, the namespace's blob Store holds a
+// durable snapshot of the last good upstream index (a .cache/ entry). Crucially,
+// while upstream is reachable the durable snapshot is write-through only — every
+// miss past the memo refetches upstream and overwrites the snapshot; the
+// snapshot is *read* only as a fallback when upstream is unavailable. Artifact
+// bytes are handled differently: they are cached on first pull as real Files and
+// served from our storage thereafter (see download).
 type proxyEngine struct {
-	now        func() time.Time
-	metaTTL    time.Duration
-	httpc      *httpclient.Client
-	artifactc  *httpclient.Client
-	neg        *negcache.Cache
-	indexCache *projectCache
-	sfIndex    singleflight.Group[*proxyIndex]
+	now       func() time.Time
+	httpc     *httpclient.Client
+	artifactc *httpclient.Client
+	neg       *negcache.Cache
+	mem       *indexMemo
+	sfIndex   singleflight.Group[*proxyIndex]
 }
 
 func newProxyEngine(cfg Config, now func() time.Time) *proxyEngine {
 	return &proxyEngine{
-		now:        now,
-		metaTTL:    cfg.proxyMetadataTTL(),
-		httpc:      httpclient.New(),
-		artifactc:  httpclient.New(httpclient.WithMaxBodyBytes(cfg.proxyMaxArtifactBytes())),
-		neg:        negcache.New(cfg.ProxyNegativeCacheTTL),
-		indexCache: newProjectCache(cfg.proxyIndexCacheTTL(), now),
+		now:       now,
+		httpc:     httpclient.New(),
+		artifactc: httpclient.New(httpclient.WithMaxBodyBytes(cfg.proxyMaxArtifactBytes())),
+		neg:       negcache.New(cfg.ProxyNegativeCacheTTL),
+		mem:       newIndexMemo(cfg.proxyIndexCacheTTL(), now),
 	}
+}
+
+// indexMemo is the in-process, short-TTL cache of parsed upstream indexes. It is
+// the burst-absorbing first level in front of upstream; it never holds negative
+// results (those live in the negative cache) and is not durable.
+type indexMemo struct {
+	ttl time.Duration
+	now func() time.Time
+	mu  sync.Mutex
+	m   map[string]indexMemoEntry
+}
+
+type indexMemoEntry struct {
+	idx     *proxyIndex
+	expires time.Time
+}
+
+func newIndexMemo(ttl time.Duration, now func() time.Time) *indexMemo {
+	return &indexMemo{ttl: ttl, now: now, m: make(map[string]indexMemoEntry)}
+}
+
+func (c *indexMemo) get(key string) (*proxyIndex, bool) {
+	if c.ttl <= 0 {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[key]; ok && c.now().Before(e.expires) {
+		return e.idx, true
+	}
+	return nil, false
+}
+
+func (c *indexMemo) put(key string, idx *proxyIndex) {
+	if c.ttl <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.m[key] = indexMemoEntry{idx: idx, expires: c.now().Add(c.ttl)}
+	c.mu.Unlock()
 }
 
 // proxyIndex is the canonical metadata cached for a project's upstream simple
@@ -96,17 +140,12 @@ func (e *proxyEngine) projectIndex(w http.ResponseWriter, r *http.Request, ns st
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	page, err := e.indexCache.get(ns, project, func() (ProjectPage, error) {
-		idx, err := e.fetchIndex(r.Context(), ns, store, spec, project)
-		if err != nil {
-			return ProjectPage{}, err
-		}
-		return e.renderPage(ns, idx), nil
-	})
+	idx, err := e.fetchIndex(r.Context(), ns, store, spec, project)
 	if err != nil {
 		e.writeIndexError(w, r, err)
 		return
 	}
+	page := e.renderPage(ns, idx)
 	if PrefersSimpleJSON(r.Header.Get("Accept")) {
 		w.Header().Set("Content-Type", simpleJSONMediaType)
 		w.WriteHeader(http.StatusOK)
@@ -223,37 +262,41 @@ func (e *proxyEngine) download(w http.ResponseWriter, r *http.Request, ns string
 	_, _ = w.Write(resp.Body)
 }
 
-// fetchIndex returns the cached or freshly fetched upstream index for project,
-// short-circuiting on a remembered upstream 404 and coalescing concurrent cold
-// fills per (namespace, project).
+// fetchIndex returns the upstream index for project through the two-level cache:
+// the in-process memo (burst absorber) first, then a singleflight-coalesced
+// load that goes to upstream and falls back to the durable snapshot only when
+// upstream is unavailable. A remembered upstream 404 short-circuits to NotFound.
 func (e *proxyEngine) fetchIndex(ctx context.Context, ns string, store core.Store, spec namespace.Spec, project string) (*proxyIndex, error) {
+	key := ns + "\x00" + project
+	if idx, ok := e.mem.get(key); ok {
+		return idx, nil
+	}
 	if e.neg.Has(ns, pypiFormat, simpleKey(project)) {
 		return nil, core.ErrNotFound
 	}
-	idx, err, _ := e.sfIndex.Do(ns+"\x00"+project, func() (*proxyIndex, error) {
+	idx, err, _ := e.sfIndex.Do(key, func() (*proxyIndex, error) {
+		if idx, ok := e.mem.get(key); ok {
+			return idx, nil
+		}
 		return e.loadIndex(ctx, ns, store, spec, project)
 	})
-	return idx, err
+	if err != nil {
+		return nil, err
+	}
+	e.mem.put(key, idx)
+	return idx, nil
 }
 
+// loadIndex fetches the upstream index and, on success, overwrites the durable
+// snapshot (write-through). The snapshot is read only when upstream is
+// unavailable — see fallbackIndex. A clean upstream 404 is negative-cached.
 func (e *proxyEngine) loadIndex(ctx context.Context, ns string, store core.Store, spec namespace.Spec, project string) (*proxyIndex, error) {
 	key := simpleKey(project)
-	cf := store.Cache(key)
-	var stale *proxyIndex
-	if exists, err := cf.Exists(ctx); err == nil && exists {
-		if idx, meta, err := readCachedIndex(ctx, cf); err == nil {
-			if e.now().Sub(meta.UpdatedAt) < e.metaTTL {
-				return idx, nil
-			}
-			stale = idx
-		}
-	}
-
 	resp, err := e.httpc.Get(ctx, e.simpleURL(spec, project))
 	if err != nil {
 		logging.FromContext(ctx).Warn("proxy index fetch failed",
 			logging.KeyComponent, "pypi", logging.KeyError, err)
-		return e.fallbackIndex(ctx, store, project, stale)
+		return e.fallbackIndex(ctx, store, project)
 	}
 	switch {
 	case resp.IsNotFound():
@@ -264,7 +307,7 @@ func (e *proxyEngine) loadIndex(ctx context.Context, ns string, store core.Store
 		if perr != nil {
 			logging.FromContext(ctx).Warn("proxy index parse failed",
 				logging.KeyComponent, "pypi", logging.KeyError, perr)
-			return e.fallbackIndex(ctx, store, project, stale)
+			return e.fallbackIndex(ctx, store, project)
 		}
 		if b, err := json.Marshal(idx); err == nil {
 			if _, err := store.AddCache(ctx, key, bytes.NewReader(b)); err != nil {
@@ -277,15 +320,19 @@ func (e *proxyEngine) loadIndex(ctx context.Context, ns string, store core.Store
 	default:
 		logging.FromContext(ctx).Warn("proxy index upstream status",
 			logging.KeyComponent, "pypi", "status", resp.Status)
-		return e.fallbackIndex(ctx, store, project, stale)
+		return e.fallbackIndex(ctx, store, project)
 	}
 }
 
-// fallbackIndex serves a stale cached index, then a synthesized one built from
-// locally cached files, and finally reports the upstream as unavailable.
-func (e *proxyEngine) fallbackIndex(ctx context.Context, store core.Store, project string, stale *proxyIndex) (*proxyIndex, error) {
-	if stale != nil {
-		return stale, nil
+// fallbackIndex is the upstream-unavailable path: serve the durable snapshot at
+// any age, else a minimal index synthesized from locally cached files, else
+// report the upstream as unavailable (503).
+func (e *proxyEngine) fallbackIndex(ctx context.Context, store core.Store, project string) (*proxyIndex, error) {
+	cf := store.Cache(simpleKey(project))
+	if exists, err := cf.Exists(ctx); err == nil && exists {
+		if idx, err := readCachedIndex(ctx, cf); err == nil {
+			return idx, nil
+		}
 	}
 	if syn, ok := e.synthesize(ctx, store, project); ok {
 		return syn, nil
@@ -452,25 +499,21 @@ func fileKey(project, version, filename string) string {
 	return "pypi:file:" + project + ":" + version + ":" + filename
 }
 
-func readCachedIndex(ctx context.Context, cf core.CacheFile) (*proxyIndex, core.Meta, error) {
-	meta, err := cf.Meta(ctx)
-	if err != nil {
-		return nil, core.Meta{}, err
-	}
+func readCachedIndex(ctx context.Context, cf core.CacheFile) (*proxyIndex, error) {
 	rc, err := cf.Read(ctx)
 	if err != nil {
-		return nil, core.Meta{}, err
+		return nil, err
 	}
 	defer rc.Close()
 	b, err := io.ReadAll(rc)
 	if err != nil {
-		return nil, core.Meta{}, err
+		return nil, err
 	}
 	var idx proxyIndex
 	if err := json.Unmarshal(b, &idx); err != nil {
-		return nil, core.Meta{}, err
+		return nil, err
 	}
-	return &idx, meta, nil
+	return &idx, nil
 }
 
 func proxyFileAnnotations(project, version, filename string, meta proxyFileMeta, fetchedAt time.Time) map[string]any {

@@ -85,8 +85,7 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.String("authn-oidc-audience", "", "expected OIDC token audience")
 	f.Int64("pypi-max-upload-bytes", pypi.DefaultMaxUploadBytes, "maximum PyPI multipart upload size in bytes; 0 uses the default cap")
 	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
-	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "per-process PyPI proxy rendered simple-index cache TTL; 0 uses the default, negative disables caching")
-	f.Duration("pypi-proxy-metadata-ttl", pypi.DefaultProxyMetadataTTL, "freshness window for a cached PyPI proxy upstream simple index; 0 uses the default")
+	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "in-process PyPI proxy upstream-index cache TTL (burst absorber); 0 uses the default, negative disables caching")
 	f.Duration("pypi-proxy-negative-cache-ttl", pypi.DefaultProxyNegativeCacheTTL, "how long an upstream PyPI 404 is remembered in proxy mode; 0 uses the default")
 	f.Int64("pypi-proxy-max-artifact-bytes", pypi.DefaultProxyMaxArtifactBytes, "maximum buffered upstream artifact size during a PyPI proxy cache fill; 0 uses the default cap")
 }
@@ -135,7 +134,6 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.PyPI.MaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
 		cfg.PyPI.SimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
 		cfg.PyPI.ProxyIndexCacheTTL = v.GetDuration("pypi-proxy-index-cache-ttl")
-		cfg.PyPI.ProxyMetadataTTL = v.GetDuration("pypi-proxy-metadata-ttl")
 		cfg.PyPI.ProxyNegativeCacheTTL = v.GetDuration("pypi-proxy-negative-cache-ttl")
 		cfg.PyPI.ProxyMaxArtifactBytes = v.GetInt64("pypi-proxy-max-artifact-bytes")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
@@ -184,9 +182,6 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.PyPI.SimpleIndexCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPI.SimpleIndexCacheTTL))
-		}
-		if c.PyPI.ProxyMetadataTTL < 0 {
-			errs = append(errs, fmt.Errorf("invalid --pypi-proxy-metadata-ttl %s: must be >= 0", c.PyPI.ProxyMetadataTTL))
 		}
 		if c.PyPI.ProxyNegativeCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-proxy-negative-cache-ttl %s: must be >= 0", c.PyPI.ProxyNegativeCacheTTL))

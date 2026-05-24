@@ -29,14 +29,12 @@ const (
 
 const DefaultMaxUploadBytes int64 = 100 << 20
 
-// Proxy-mode defaults. The in-process index cache is a short rendered-page cache
-// in front of the blob-backed metadata cache; the metadata TTL is the freshness
-// window on the cached upstream simple index; the negative TTL bounds how long
+// Proxy-mode defaults. The index cache is the in-process burst absorber in
+// front of the durable upstream-index snapshot; the negative TTL bounds how long
 // an upstream 404 is remembered; the artifact cap bounds the buffered upstream
 // body during a cold cache fill.
 const (
 	DefaultProxyIndexCacheTTL          = 10 * time.Second
-	DefaultProxyMetadataTTL            = 10 * time.Minute
 	DefaultProxyNegativeCacheTTL       = 30 * time.Second
 	DefaultProxyMaxArtifactBytes int64 = 1 << 30
 )
@@ -47,7 +45,6 @@ type Config struct {
 
 	// Proxy-mode knobs. A zero value falls back to the matching Default above.
 	ProxyIndexCacheTTL    time.Duration
-	ProxyMetadataTTL      time.Duration
 	ProxyNegativeCacheTTL time.Duration
 	ProxyMaxArtifactBytes int64
 }
@@ -57,13 +54,6 @@ func (c Config) uploadLimit() int64 {
 		return DefaultMaxUploadBytes
 	}
 	return c.MaxUploadBytes
-}
-
-func (c Config) proxyMetadataTTL() time.Duration {
-	if c.ProxyMetadataTTL <= 0 {
-		return DefaultProxyMetadataTTL
-	}
-	return c.ProxyMetadataTTL
 }
 
 func (c Config) proxyMaxArtifactBytes() int64 {

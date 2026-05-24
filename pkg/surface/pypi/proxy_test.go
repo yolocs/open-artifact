@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/memblob"
@@ -310,9 +309,10 @@ func TestProxyStaleIndexFallback(t *testing.T) {
 
 	wheel := upstreamFile{filename: "demo-1.0.0.tar.gz", body: []byte("sdist")}
 	up := newFakeUpstream(t, "demo", []upstreamFile{wheel}, false)
-	// Tiny metadata TTL forces a re-fetch on every request; no in-process cache.
+	// No in-process cache: every request re-resolves, so the second one hits the
+	// (now failing) upstream and must fall back to the durable snapshot.
 	h := newProxyHarness(t, memblob.OpenBucket(nil),
-		pypi.Config{ProxyIndexCacheTTL: -1, ProxyMetadataTTL: time.Nanosecond},
+		pypi.Config{ProxyIndexCacheTTL: -1},
 		proxyNamespace("team-proxy", up.server.URL))
 
 	first := get(t, h, "/team-proxy/simple/demo/", "")
@@ -386,8 +386,10 @@ func TestProxyHashMismatchReturns502(t *testing.T) {
 	// different bytes for the file, so verification must fail.
 	wheel := upstreamFile{filename: "demo-1.0.0-py3-none-any.whl", body: []byte("correct")}
 	up := newFakeUpstream(t, "demo", []upstreamFile{wheel}, false)
-	h := newProxyHarness(t, memblob.OpenBucket(nil),
-		pypi.Config{ProxyIndexCacheTTL: -1},
+	// Keep the in-process index cache on so the cached index retains the
+	// original advertised sha while the upstream file server returns different
+	// bytes — the realistic "index hash does not match served bytes" mismatch.
+	h := newProxyHarness(t, memblob.OpenBucket(nil), pypi.Config{},
 		proxyNamespace("team-proxy", up.server.URL))
 
 	// Prime the index (records the correct sha), then corrupt the file bytes.
