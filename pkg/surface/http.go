@@ -144,6 +144,68 @@ func (w *headResponseWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// storeTee forwards bytes to a Store pipe but never propagates a write error
+// back to the TeeReader, so a Store-side failure cannot truncate the client
+// stream. The pipe is closed with the error by the fill goroutine; subsequent
+// writes here return that error and are swallowed.
+type storeTee struct {
+	w      io.Writer
+	failed bool
+}
+
+func (t *storeTee) Write(p []byte) (int, error) {
+	if t.failed {
+		return len(p), nil
+	}
+	if _, err := t.w.Write(p); err != nil {
+		t.failed = true
+	}
+	return len(p), nil
+}
+
+// TeeStreamToStore streams body to the client while teeing the same bytes into a
+// Store write performed by fill (typically a Version.AddFile). It is the shared
+// pull-through cold-fill primitive: the client is the primary consumer, so a
+// fill (Store-write) error is never propagated to the client stream and cannot
+// truncate the response; conversely, if the client read fails mid-stream the
+// fill aborts cleanly (the pipe is closed with the error) so no truncated,
+// servable blob is committed. It writes a 200 with the given Content-Type and
+// (when >= 0) Content-Length, then returns the client copy error and the fill
+// error for the caller to log and act on (e.g. record parent metadata only when
+// both are nil).
+func TeeStreamToStore(w http.ResponseWriter, body io.Reader, contentType string, contentLength int64, fill func(src io.Reader) error) (copyErr, fillErr error) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := fill(pr)
+		// Unblock the writer side: once fill stops reading (success or failure),
+		// further tee writes must not deadlock — they return this err and are
+		// swallowed by storeTee.
+		_ = pr.CloseWithError(err)
+		done <- err
+	}()
+
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	if contentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+
+	tee := &storeTee{w: pw}
+	_, copyErr = io.Copy(w, io.TeeReader(body, tee))
+	// Signal end-of-stream to the Store writer: clean EOF on success, the error
+	// otherwise so the partial write aborts rather than committing.
+	if copyErr != nil {
+		_ = pw.CloseWithError(copyErr)
+	} else {
+		_ = pw.Close()
+	}
+	fillErr = <-done
+	return copyErr, fillErr
+}
+
 func RedirectOrStreamFile(w http.ResponseWriter, r *http.Request, f core.File, contentType string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})

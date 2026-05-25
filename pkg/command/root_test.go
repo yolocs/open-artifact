@@ -62,7 +62,10 @@ func TestServeDefaults(t *testing.T) {
 			ProxyNegativeCacheTTL: pypi.DefaultProxyNegativeCacheTTL,
 		},
 		NPM: npm.Config{
-			MaxUploadBytes: npm.DefaultMaxUploadBytes,
+			MaxUploadBytes:         npm.DefaultMaxUploadBytes,
+			ProxyPackumentMemoTTL:  npm.DefaultProxyPackumentMemoTTL,
+			ProxyPackumentCacheTTL: npm.DefaultProxyPackumentCacheTTL,
+			ProxyNegativeCacheTTL:  npm.DefaultProxyNegativeCacheTTL,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {

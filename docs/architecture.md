@@ -10,8 +10,8 @@ for how to run and configure the binary see
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
 logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
-proxy serving, the npm hosted surface, and the shared proxy primitives exist
-today; the npm proxy and the Maven surfaces are described here as the design
+proxy serving, the npm hosted and proxy surfaces, and the shared proxy
+primitives exist today; the Maven surfaces are described here as the design
 they are being built toward. Where it matters, sections note what is
 implemented versus planned.
 
@@ -511,7 +511,12 @@ index/metadata lands in `.cache/`. Cold-miss bytes flow through open-artifact
 (never redirect clients to public upstream URLs); a Store-hosted artifact may
 still use backend signed-URL redirects because those target the
 operator-controlled bucket. Reader policy is sufficient to populate both the
-Store and the cache.
+Store and the cache. The cold-fill stream-and-tee mechanics are shared in the
+`surface` framework as `surface.TeeStreamToStore`: it streams the upstream body
+to the client while teeing the same bytes into a caller-supplied Store write, so
+a Store-write failure never truncates the client and a client disconnect aborts
+the partial write cleanly. Both the PyPI and npm proxies compose it; each owns
+only its format-specific metadata recording.
 
 The hosted PyPI simple-project page also has a small **process-local rendered
 HTML/JSON source cache**. It is intentionally not durable state: the bucket
@@ -616,9 +621,63 @@ registry-root probes. Scoped names arrive either as `@scope/name` or
   reader and writer policy); `DELETE` returns 501 in v1.
 - **Modes/auth.** Reads authorize `OpRead`, publish and dist-tag mutation
   `OpWrite`, all enforced below the surface inside the guarded Store. Proxy
-  namespaces are handled separately (the npm proxy is planned): until then a
-  proxy-mode write returns 405-equivalent rejection and reads map to
-  `ErrUnsupported` (501).
+  namespaces are dispatched to the npm proxy (below); a proxy-mode publish or
+  dist-tag mutation is rejected with `405 Method Not Allowed`
+  (`Allow: GET, HEAD`).
+
+### npm proxy mode
+
+An npm namespace with `mode: proxy` is a pull-through cache of
+`Spec.Proxy.Upstream` (e.g. `https://registry.npmjs.org`, trailing slash
+trimmed). The surface reads `Spec.Mode` per request and dispatches: packument
+GET/HEAD, tarball GET/HEAD, dist-tags GET, the registry-root probe, and
+`/-/ping` are served as pull-through reads; publish, dist-tag add/delete, and
+any other mutation are rejected with `405`. Reader policy gates the whole
+operation (via `AuthorizedProxyStore`), so a reader-only namespace can populate
+the cache.
+
+- **Packument** (`GET/HEAD /{ns}/{pkg}`) uses a two-level cache. An in-process
+  memo (default 10s) absorbs bursts. Behind it the namespace's blob Store holds
+  a durable snapshot keyed `npm:packument:<core>` (the parsed upstream packument
+  with each version's `dist.tarball` left pointing at the *upstream* URL).
+  **Unlike the PyPI proxy** — whose durable snapshot is write-through and read
+  only when upstream is unavailable — the npm durable snapshot is served
+  directly while it is *fresh* (younger than the durable TTL, default ~10m)
+  without contacting upstream. This is a deliberate, justified divergence: npm
+  packuments are heavier and change far less often than per-request, so a short
+  durable TTL bounds staleness while cutting upstream load; the burst memo still
+  collapses the within-TTL stampede, and a negative durable TTL collapses the
+  behavior back to the PyPI shape (never fresh-serve; durable only as a
+  fallback), which tests use to force refetch. On a stale/missing snapshot the
+  surface fetches upstream (coalesced per `(ns, core)` with singleflight),
+  overwrites the snapshot, and serves it. On serve, every
+  `versions[*].dist.tarball` is rewritten to `/{ns}/{pkg}/-/{filename}` on the
+  current request host (honoring `X-Forwarded-Proto/Host`), and the upstream
+  `dist-tags` are preserved. If the upstream refresh fails, the surface serves
+  the durable snapshot at any age, else a minimal packument synthesized from
+  locally cached tarballs and `package.json` documents (local dist-tags when
+  present, otherwise omitted), else `503`. A clean upstream `404` is
+  negative-cached (default 30s, key `npm:packument:<core>`) and returned as
+  `404`. Scoped names use the upstream's single-segment `/@scope%2fname`
+  packument path.
+- **Tarball** (`GET/HEAD …/-/{filename}.tgz`) serves the local `File` when
+  present (the npm filename encodes the version, so a warm hit needs no
+  packument fetch). On a miss it resolves the version and upstream tarball URL
+  from the cached packument (matching the `dist.tarball` basename), evaluates the
+  namespace filter chain (`Ref{Package: npmName, Version, PublishedAt}`, where
+  the publish time comes from the packument's `time[version]`; a delay filter
+  with an unknown time fails closed), then **streams** the bytes through
+  open-artifact with a **tee into the Store** as a real `Package`/`Version`/`File`
+  (`surface.TeeStreamToStore`, no full-artifact buffering). On a clean fill it
+  records the package/version envelopes and stores the per-version `package.json`
+  with `dist.tarball` rewritten back to open-artifact, so the cache survives a
+  process restart and can synthesize a packument when upstream is later
+  unavailable. `HEAD` answers existence from packument metadata without fetching
+  or caching bytes. A clean upstream `404` is negative-cached
+  (key `npm:tarball:<core>:<filename>`); a denied artifact is logged and returned
+  as `404`. We do not re-verify the upstream `shasum`/`integrity`; the local
+  `File`'s own digest is authoritative and npm verifies `dist.integrity` end to
+  end.
 
 ## gocloud.dev/blob notes
 

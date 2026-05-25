@@ -35,6 +35,18 @@ const metadataFile = "package.json"
 // base64 inside a JSON document, so the body is ~1.37x the tarball size.
 const DefaultMaxUploadBytes int64 = 100 << 20
 
+// Proxy-mode defaults. The packument memo is the in-process burst absorber in
+// front of the durable upstream-packument snapshot; the durable snapshot is
+// served while younger than the cache TTL and as a stale fallback when upstream
+// is unavailable; the negative TTL bounds how long an upstream 404 is
+// remembered. Tarball bytes are streamed straight through (tee-to-store), so
+// there is no artifact buffer to cap.
+const (
+	DefaultProxyPackumentMemoTTL  = 10 * time.Second
+	DefaultProxyPackumentCacheTTL = 10 * time.Minute
+	DefaultProxyNegativeCacheTTL  = 30 * time.Second
+)
+
 // versionReadConcurrency bounds the per-version metadata fan-out when assembling
 // a packument so a package with many versions does not open an unbounded number
 // of simultaneous backend reads.
@@ -42,6 +54,11 @@ const versionReadConcurrency = 16
 
 type Config struct {
 	MaxUploadBytes int64
+
+	// Proxy-mode knobs. A zero value falls back to the matching Default above.
+	ProxyPackumentMemoTTL  time.Duration
+	ProxyPackumentCacheTTL time.Duration
+	ProxyNegativeCacheTTL  time.Duration
 }
 
 func (c Config) uploadLimit() int64 {
@@ -51,19 +68,43 @@ func (c Config) uploadLimit() int64 {
 	return c.MaxUploadBytes
 }
 
+// proxyPackumentMemoTTL resolves the in-process packument memo TTL: zero means
+// the default, a negative value disables the memo (so every request re-resolves
+// through the durable cache, which lets tests force re-resolution).
+func (c Config) proxyPackumentMemoTTL() time.Duration {
+	if c.ProxyPackumentMemoTTL == 0 {
+		return DefaultProxyPackumentMemoTTL
+	}
+	return c.ProxyPackumentMemoTTL
+}
+
+// proxyPackumentCacheTTL resolves the durable packument freshness window: zero
+// means the default, a negative value means the durable snapshot is never
+// served as fresh (every miss past the memo refetches upstream, the snapshot
+// serving only as a stale fallback — matching the PyPI proxy and letting tests
+// force upstream refetch).
+func (c Config) proxyPackumentCacheTTL() time.Duration {
+	if c.ProxyPackumentCacheTTL == 0 {
+		return DefaultProxyPackumentCacheTTL
+	}
+	return c.ProxyPackumentCacheTTL
+}
+
 // Handler builds the npm registry surface. It composes namespace lookup and
 // authorization, hosted/proxy dispatch, and the shared error/redirect helpers
 // exactly like the PyPI surface; only the wire protocol and codec are
 // npm-specific.
 func Handler(reg *namespace.Registry, authn auth.Authenticator, cfg Config) http.Handler {
-	h := &handler{reg: reg, opts: cfg, now: time.Now}
+	now := time.Now
+	h := &handler{reg: reg, opts: cfg, now: now, proxy: newProxyEngine(cfg, now)}
 	return auth.Middleware(authn)(h.router())
 }
 
 type handler struct {
-	reg  *namespace.Registry
-	opts Config
-	now  func() time.Time
+	reg   *namespace.Registry
+	opts  Config
+	now   func() time.Time
+	proxy *proxyEngine
 }
 
 func (h *handler) router() http.Handler {
@@ -118,8 +159,9 @@ func (h *handler) spec(w http.ResponseWriter, r *http.Request, ns string, write 
 	return spec, true
 }
 
-// authorizedHostedStore returns the guarded store for a hosted namespace,
-// writing the appropriate error and rejecting proxy namespaces.
+// authorizedHostedStore returns the guarded store for a hosted namespace. Proxy
+// namespaces are dispatched to the proxy engine before this is reached; the
+// proxy guard here is a defensive safety net only.
 func (h *handler) authorizedHostedStore(w http.ResponseWriter, r *http.Request, ns string, write bool) (core.Store, error) {
 	ac := auth.FromContext(r.Context())
 	store, spec, err := h.reg.AuthorizedStore(r.Context(), ns, npmFormat, ac)
@@ -128,12 +170,22 @@ func (h *handler) authorizedHostedStore(w http.ResponseWriter, r *http.Request, 
 		return nil, err
 	}
 	if spec.IsProxy() {
-		// Proxy mode is implemented separately (#22). Until then writes are
-		// rejected and reads are not implemented.
 		surface.WriteStoreError(w, r, core.ErrUnsupported)
 		return nil, core.ErrUnsupported
 	}
 	return store, nil
+}
+
+// authorizedProxyStore authorizes the caller against the namespace reader policy
+// and returns an unguarded store for pull-through cache fills.
+func (h *handler) authorizedProxyStore(w http.ResponseWriter, r *http.Request, ns string) (core.Store, bool) {
+	ac := auth.FromContext(r.Context())
+	store, _, err := h.reg.AuthorizedProxyStore(r.Context(), ns, npmFormat, ac)
+	if err != nil {
+		surface.WriteNamespaceError(w, r, err, surface.NamespaceDataRead)
+		return nil, false
+	}
+	return store, true
 }
 
 func namespaceErrCtx(write bool) surface.NamespaceErrorContext {
@@ -141,22 +193,6 @@ func namespaceErrCtx(write bool) surface.NamespaceErrorContext {
 		return surface.NamespaceDataWrite
 	}
 	return surface.NamespaceDataRead
-}
-
-// rejectProxy handles a proxy-mode namespace: a write is rejected with 405
-// (Allow: GET, HEAD) since a proxy never accepts uploads, and a read maps to
-// ErrUnsupported (501) until the npm proxy lands (#22). It returns true when it
-// wrote a response.
-func (h *handler) rejectProxy(w http.ResponseWriter, r *http.Request, spec namespace.Spec, write bool) bool {
-	if !spec.IsProxy() {
-		return false
-	}
-	if write {
-		surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
-	} else {
-		surface.WriteStoreError(w, r, core.ErrUnsupported)
-	}
-	return true
 }
 
 // parsePackageVars assembles a PackageName from the router's scope/name vars.
@@ -211,7 +247,17 @@ func (h *handler) packageRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if h.rejectProxy(w, r, spec, write) {
+	if spec.IsProxy() {
+		if write {
+			// A proxy namespace is a pull-through cache: it never accepts publishes.
+			surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
+			return
+		}
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxy.packument(w, r, ns, spec, store, pn)
 		return
 	}
 	if write {
@@ -241,7 +287,12 @@ func (h *handler) tarballRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if h.rejectProxy(w, r, spec, false) {
+	if spec.IsProxy() {
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxy.tarball(w, r, ns, spec, store, pn, filename)
 		return
 	}
 	store, err := h.authorizedHostedStore(w, r, ns, false)
@@ -275,7 +326,12 @@ func (h *handler) distTagsListRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if h.rejectProxy(w, r, spec, false) {
+	if spec.IsProxy() {
+		store, ok := h.authorizedProxyStore(w, r, ns)
+		if !ok {
+			return
+		}
+		h.proxy.distTags(w, r, ns, spec, store, pn)
 		return
 	}
 	store, err := h.authorizedHostedStore(w, r, ns, false)
@@ -303,10 +359,9 @@ func (h *handler) distTagsListRoute(w http.ResponseWriter, r *http.Request) {
 func (h *handler) distTagsRoute(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		observability.SetOperation(r, "dist-tags.delete")
-		surface.WriteStoreError(w, r, core.ErrUnsupported)
-		return
+	} else {
+		observability.SetOperation(r, "dist-tags.set")
 	}
-	observability.SetOperation(r, "dist-tags.set")
 	pn, err := parsePackageVars(mux.Vars(r))
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
@@ -325,7 +380,15 @@ func (h *handler) distTagsRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if h.rejectProxy(w, r, spec, true) {
+	if spec.IsProxy() {
+		// A proxy namespace is a pull-through cache: dist-tag add/delete (and any
+		// other mutation) is rejected.
+		surface.WriteMethodNotAllowed(w, []string{http.MethodGet, http.MethodHead})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		// DELETE is not implemented in hosted mode in v1.
+		surface.WriteStoreError(w, r, core.ErrUnsupported)
 		return
 	}
 	store, err := h.authorizedHostedStore(w, r, ns, true)
