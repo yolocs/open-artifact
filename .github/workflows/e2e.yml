@@ -47,4 +47,8 @@ jobs:
         run: go test -race -tags=integration -run '^TestNPMScopedPublishAndInstall$' ./pkg/surface/npm
       - name: npm hosted - dist-tags (add, ls)
         run: go test -race -tags=integration -run '^TestNPMDistTags$' ./pkg/surface/npm
+      - name: npm proxy - install (in-process upstream)
+        run: go test -race -tags=integration -run '^TestNPMProxyInstall$' ./pkg/surface/npm
+      - name: npm proxy - download (real registry.npmjs.org)
+        run: go test -race -tags=npmupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/npm
 
