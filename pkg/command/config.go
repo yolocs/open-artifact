@@ -85,6 +85,8 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.String("authn-oidc-audience", "", "expected OIDC token audience")
 	f.Int64("pypi-max-upload-bytes", pypi.DefaultMaxUploadBytes, "maximum PyPI multipart upload size in bytes; 0 uses the default cap")
 	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
+	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "in-process PyPI proxy upstream-index cache TTL (burst absorber); 0 uses the default, negative disables caching")
+	f.Duration("pypi-proxy-negative-cache-ttl", pypi.DefaultProxyNegativeCacheTTL, "how long an upstream PyPI 404 is remembered in proxy mode; 0 uses the default")
 }
 
 // newViper builds a viper bound to cmd's flags with OPEN_ARTIFACT env
@@ -130,6 +132,8 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.AuthnOIDCAudience = strings.TrimSpace(v.GetString("authn-oidc-audience"))
 		cfg.PyPI.MaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
 		cfg.PyPI.SimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
+		cfg.PyPI.ProxyIndexCacheTTL = v.GetDuration("pypi-proxy-index-cache-ttl")
+		cfg.PyPI.ProxyNegativeCacheTTL = v.GetDuration("pypi-proxy-negative-cache-ttl")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -176,6 +180,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.PyPI.SimpleIndexCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPI.SimpleIndexCacheTTL))
+		}
+		if c.PyPI.ProxyNegativeCacheTTL < 0 {
+			errs = append(errs, fmt.Errorf("invalid --pypi-proxy-negative-cache-ttl %s: must be >= 0", c.PyPI.ProxyNegativeCacheTTL))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}

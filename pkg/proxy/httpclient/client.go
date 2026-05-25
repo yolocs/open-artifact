@@ -150,6 +150,46 @@ func (c *Client) Get(ctx context.Context, url string) (*Response, error) {
 	return out, nil
 }
 
+// StreamResponse is an upstream reply whose Body is left open and unread. Unlike
+// Get, the body is not buffered or capped, so it suits large artifacts that
+// should be streamed straight through to a client (and teed into storage). The
+// caller MUST close Body. The overall transfer is bounded by the request
+// context, not by maxBodyBytes.
+type StreamResponse struct {
+	Status        int
+	Body          io.ReadCloser
+	ContentType   string
+	ContentLength int64
+	Header        http.Header
+}
+
+// IsOK reports a 2xx status.
+func (r *StreamResponse) IsOK() bool { return r.Status >= 200 && r.Status < 300 }
+
+// IsNotFound reports a 404.
+func (r *StreamResponse) IsNotFound() bool { return r.Status == http.StatusNotFound }
+
+// IsServerError reports a 5xx status.
+func (r *StreamResponse) IsServerError() bool { return r.Status >= 500 }
+
+// Stream issues a GET and returns the response with its body open and unread for
+// the caller to stream and close. HTTP status codes are not errors; inspect
+// Status (or IsOK/IsNotFound/IsServerError) — note that even a non-2xx response
+// carries an open Body the caller must close.
+func (c *Client) Stream(ctx context.Context, url string) (*StreamResponse, error) {
+	resp, err := c.do(ctx, http.MethodGet, url)
+	if err != nil {
+		return nil, err
+	}
+	return &StreamResponse{
+		Status:        resp.StatusCode,
+		Body:          resp.Body,
+		ContentType:   resp.Header.Get("Content-Type"),
+		ContentLength: resp.ContentLength,
+		Header:        resp.Header,
+	}, nil
+}
+
 // Head issues a HEAD request and returns headers and status without a body.
 func (c *Client) Head(ctx context.Context, url string) (*Response, error) {
 	resp, err := c.do(ctx, http.MethodHead, url)

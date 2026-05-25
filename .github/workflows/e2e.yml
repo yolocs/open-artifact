@@ -1,4 +1,4 @@
-name: E2E
+name: Integration
 
 on:
   push:
@@ -8,8 +8,11 @@ on:
 permissions:
   contents: read
 
+# One integration workflow. Each scenario (surface x hosted/proxy x client use
+# case) is its own step so a failure points straight at the broken scenario.
+# Integration tests hit real clients and real upstreams by definition.
 jobs:
-  real-clients:
+  pypi:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +24,9 @@ jobs:
           python-version: "3.x"
       - name: Install Python clients
         run: python -m pip install --upgrade pip twine
-      - name: Run pip download/install integration test
-        run: go test -race -tags=integration -run '^TestPipDownloadAndInstall$' ./pkg/surface/pypi
-      - name: Run twine upload integration test
-        run: go test -race -tags=integration -run '^TestTwineUpload$' ./pkg/surface/pypi
+      - name: PyPI hosted - upload (twine)
+        run: go test -race -tags=integration -run '^TestPyPIHostedUpload$' ./pkg/surface/pypi
+      - name: PyPI hosted - download (pip)
+        run: go test -race -tags=integration -run '^TestPyPIHostedDownload$' ./pkg/surface/pypi
+      - name: PyPI proxy - download (pip, real pypi.org)
+        run: go test -race -tags=integration -run '^TestPyPIProxyDownload$' ./pkg/surface/pypi
