@@ -82,6 +82,17 @@ func TestValidate(t *testing.T) {
 			mutate:    func(c *runtimeConfig) { c.RepoType = "pypi" },
 		},
 		{
+			name:      "valid maven repo type",
+			dataPlane: true,
+			mutate:    func(c *runtimeConfig) { c.RepoType = "maven" },
+		},
+		{
+			name:      "bad maven max upload bytes",
+			dataPlane: true,
+			mutate:    func(c *runtimeConfig) { c.Maven.MaxUploadBytes = -1 },
+			wantErr:   true,
+		},
+		{
 			name:      "repo type ignored on admin plane",
 			dataPlane: false,
 			mutate:    func(c *runtimeConfig) { c.RepoType = "rubygems" },

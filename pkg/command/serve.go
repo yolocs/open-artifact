@@ -15,6 +15,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/echo"
+	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
@@ -35,9 +36,8 @@ func newServeCommand(run runFunc) *cobra.Command {
 }
 
 // runServe is the real data-plane run function. It builds the authenticator and
-// the namespace registry that authorizes per-namespace access; format routing
-// (#25) installs the auth middleware and the authorized stores inside the
-// format routes.
+// the namespace registry that authorizes per-namespace access; format routes
+// install the auth middleware and the authorized stores.
 func runServe(ctx context.Context, cfg *runtimeConfig) error {
 	return serve(ctx, cfg, "serve", func(bkt *blob.Bucket, recorder metrics.Recorder) (planeHandler, error) {
 		logger := logging.FromContext(ctx)
@@ -73,11 +73,11 @@ func bucketPinger(bkt *blob.Bucket, bucketPrefix string) observability.Pinger {
 	}
 }
 
-// buildDataPlaneHandler assembles the data-plane HTTP handler. The real package
-// formats (#19-#25) will mount here, each guarding its routes with
-// auth.Middleware(authn) and reaching storage through reg.Authorized so
-// authentication and per-namespace authorization are enforced together. Until
-// then the "echo" diagnostic surface exercises that same stack end to end.
+// buildDataPlaneHandler assembles the selected data-plane HTTP handler. Each
+// real package format guards its routes with auth.Middleware(authn) and reaches
+// storage through reg.Authorized so authentication and per-namespace
+// authorization are enforced together. The "echo" diagnostic surface keeps
+// exercising that same stack end to end.
 func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn auth.Authenticator, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	if cfg.RepoType == "echo" {
@@ -85,6 +85,9 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 	}
 	if cfg.RepoType == "pypi" {
 		mux.Handle("/", observability.WrapWithFormat("pypi", pypi.Handler(reg, authn, cfg.PyPI)))
+	}
+	if cfg.RepoType == "maven" {
+		mux.Handle("/", observability.WrapWithFormat("maven", maven.Handler(reg, authn, cfg.Maven)))
 	}
 	if cfg.RepoType == "npm" {
 		mux.Handle("/", observability.WrapWithFormat("npm", npm.Handler(reg, authn, cfg.NPM)))

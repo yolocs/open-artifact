@@ -42,6 +42,16 @@ type Package interface {
 	// creation-time annotations via WithAnnotations.
 	AddVersion(ctx context.Context, name string, opts ...CreateOption) (Version, error)
 
+	// File returns a handle to a package-level File without performing I/O.
+	File(name string) File
+
+	// Files lists every package-level File under this Package.
+	Files(ctx context.Context) ([]File, error)
+
+	// AddFile uploads a package-level File. It behaves like Version.AddFile:
+	// immutable by default, digesting during upload, and recording per-file Meta.
+	AddFile(ctx context.Context, name string, body io.Reader, opts ...CreateOption) (File, error)
+
 	// Tag returns a handle to the named Tag without performing any I/O.
 	Tag(name string) Tag
 

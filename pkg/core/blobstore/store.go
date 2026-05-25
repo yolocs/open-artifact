@@ -169,6 +169,39 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	return &pkg{store: s, name: name}, nil
 }
 
+func (s *Store) File(name string) core.File {
+	return newStoreFile(s, name)
+}
+
+func (s *Store) Files(ctx context.Context) ([]core.File, error) {
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	names, err := s.listChildNames(ctx, filesPrefix(scopePrefix(s.scope)))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.File, 0, len(names))
+	for _, n := range names {
+		out = append(out, newStoreFile(s, decodeSegment(n)))
+	}
+	return out, nil
+}
+
+func (s *Store) AddFile(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.File, error) {
+	f := newStoreFile(s, name)
+	if f.nameErr != nil {
+		return nil, f.nameErr
+	}
+	if err := s.authorize(ctx, true); err != nil {
+		return nil, err
+	}
+	if _, err := s.writeFile(ctx, f.blobKey, f.metaKey, body, core.NewCreateConfig(opts...)); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // Cache returns a handle to a format-level cache file (under the .cache/
 // directory directly beneath the Store's scope) without performing I/O.
 func (s *Store) Cache(key string) core.CacheFile {
@@ -376,6 +409,43 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	return &version{pkg: p, name: name}, nil
 }
 
+func (p *pkg) File(name string) core.File {
+	return newPackageFile(p, name)
+}
+
+func (p *pkg) Files(ctx context.Context) ([]core.File, error) {
+	if p.nameErr != nil {
+		return nil, p.nameErr
+	}
+	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	names, err := s.listChildNames(ctx, filesPrefix(packagePrefix(s.scope, p.name)))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.File, 0, len(names))
+	for _, n := range names {
+		out = append(out, newPackageFile(p, decodeSegment(n)))
+	}
+	return out, nil
+}
+
+func (p *pkg) AddFile(ctx context.Context, name string, body io.Reader, opts ...core.CreateOption) (core.File, error) {
+	f := newPackageFile(p, name)
+	if f.nameErr != nil {
+		return nil, f.nameErr
+	}
+	if err := p.store.authorize(ctx, true); err != nil {
+		return nil, err
+	}
+	if _, err := p.store.writeFile(ctx, f.blobKey, f.metaKey, body, core.NewCreateConfig(opts...)); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // Cache returns a handle to a package-level cache file without performing I/O.
 func (p *pkg) Cache(key string) core.CacheFile {
 	return newCacheFile(p.store, packagePrefix(p.store.scope, p.name), key, p.nameErr)
@@ -549,7 +619,7 @@ func (v *version) Files(ctx context.Context) ([]core.File, error) {
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
-	names, err := s.listChildNames(ctx, versionPrefix(s.scope, v.pkg.name, v.name))
+	names, err := s.listChildNames(ctx, filesPrefix(versionPrefix(s.scope, v.pkg.name, v.name)))
 	if err != nil {
 		return nil, err
 	}
@@ -683,17 +753,40 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 }
 
 // file is the blobstore implementation of core.File. It is path-based: blobKey
-// and metaKey are computed once at construction, so the same type backs both a
-// Version's files and a Cache's files (which have no Version parent). version is
-// nil for cache files. nameErr carries the handle's (and its ancestors') name
+// and metaKey are computed once at construction, so the same type backs Store,
+// Package, Version, and Cache files. pkg/version are nil when the level does not
+// have that parent. nameErr carries the handle's (and its ancestors') name
 // validation.
 type file struct {
 	store   *Store
 	name    string
 	blobKey string
 	metaKey string
+	pkg     *pkg
 	version *version
 	nameErr error
+}
+
+func newStoreFile(s *Store, name string) *file {
+	return &file{
+		store:   s,
+		name:    name,
+		blobKey: storeFilePath(s.scope, name),
+		metaKey: storeFileMetaPath(s.scope, name),
+		nameErr: validateName(name),
+	}
+}
+
+func newPackageFile(p *pkg, name string) *file {
+	s := p.store
+	return &file{
+		store:   s,
+		name:    name,
+		blobKey: packageFilePath(s.scope, p.name, name),
+		metaKey: packageFileMetaPath(s.scope, p.name, name),
+		pkg:     p,
+		nameErr: firstErr(p.nameErr, validateName(name)),
+	}
 }
 
 // newFile builds a handle to a Version's file.
@@ -704,6 +797,7 @@ func newFile(v *version, name string) *file {
 		name:    name,
 		blobKey: filePath(s.scope, v.pkg.name, v.name, name),
 		metaKey: fileMetaPath(s.scope, v.pkg.name, v.name, name),
+		pkg:     v.pkg,
 		version: v,
 		nameErr: firstErr(v.nameErr, validateName(name)),
 	}
@@ -731,10 +825,7 @@ func (f *file) Version() core.Version {
 	return f.version
 }
 func (f *file) Package() core.Package {
-	if f.version == nil {
-		return nil
-	}
-	return f.version.pkg
+	return f.pkg
 }
 
 func (f *file) Exists(ctx context.Context) (bool, error) {

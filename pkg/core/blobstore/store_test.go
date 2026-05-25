@@ -70,6 +70,60 @@ func sha256Hex(b []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+func assertFileBody(t *testing.T, f core.File, want string) {
+	t.Helper()
+	rc, err := f.Read(t.Context())
+	if err != nil {
+		t.Fatalf("Read %s: %v", f.Name(), err)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("ReadAll %s: %v", f.Name(), err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close %s: %v", f.Name(), err)
+	}
+	if string(got) != want {
+		t.Fatalf("file %s body = %q, want %q", f.Name(), got, want)
+	}
+}
+
+func assertNames(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("names = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("names = %v, want %v", got, want)
+		}
+	}
+}
+
+func filesToNames(files []core.File) []string {
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.Name())
+	}
+	return out
+}
+
+func packagesToNames(packages []core.Package) []string {
+	out := make([]string, 0, len(packages))
+	for _, p := range packages {
+		out = append(out, p.Name())
+	}
+	return out
+}
+
+func versionsToNames(versions []core.Version) []string {
+	out := make([]string, 0, len(versions))
+	for _, v := range versions {
+		out = append(out, v.Name())
+	}
+	return out
+}
+
 // failAfterReader yields n bytes then fails, simulating a body whose source
 // (an upstream stream, a disconnected client) errors mid-transfer.
 type failAfterReader struct {
@@ -160,6 +214,67 @@ func TestAddFileReadFileRoundTrip(t *testing.T) {
 		if meta.Size != int64(len(body)) {
 			t.Errorf("size = %d, want %d", meta.Size, len(body))
 		}
+	})
+}
+
+func TestAddFileAtStorePackageAndVersionLevels(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		s, err := NewWithBucket(b, testScope)
+		if err != nil {
+			t.Fatalf("NewWithBucket: %v", err)
+		}
+
+		if _, err := s.AddFile(ctx, "archetype-catalog.xml", strings.NewReader("catalog")); err != nil {
+			t.Fatalf("store AddFile: %v", err)
+		}
+		pkg, err := s.AddPackage(ctx, "com/example/demo")
+		if err != nil {
+			t.Fatalf("AddPackage: %v", err)
+		}
+		if _, err := pkg.AddFile(ctx, "maven-metadata.xml", strings.NewReader("package metadata")); err != nil {
+			t.Fatalf("package AddFile: %v", err)
+		}
+		ver, err := pkg.AddVersion(ctx, "1.0.0")
+		if err != nil {
+			t.Fatalf("AddVersion: %v", err)
+		}
+		if _, err := ver.AddFile(ctx, "demo-1.0.0.jar", strings.NewReader("jar")); err != nil {
+			t.Fatalf("version AddFile: %v", err)
+		}
+
+		assertFileBody(t, s.File("archetype-catalog.xml"), "catalog")
+		assertFileBody(t, pkg.File("maven-metadata.xml"), "package metadata")
+		assertFileBody(t, ver.File("demo-1.0.0.jar"), "jar")
+
+		storeFiles, err := s.Files(ctx)
+		if err != nil {
+			t.Fatalf("store Files: %v", err)
+		}
+		assertNames(t, filesToNames(storeFiles), []string{"archetype-catalog.xml"})
+		packageFiles, err := pkg.Files(ctx)
+		if err != nil {
+			t.Fatalf("package Files: %v", err)
+		}
+		assertNames(t, filesToNames(packageFiles), []string{"maven-metadata.xml"})
+		versionFiles, err := ver.Files(ctx)
+		if err != nil {
+			t.Fatalf("version Files: %v", err)
+		}
+		assertNames(t, filesToNames(versionFiles), []string{"demo-1.0.0.jar"})
+
+		packages, err := s.Packages(ctx)
+		if err != nil {
+			t.Fatalf("Packages: %v", err)
+		}
+		assertNames(t, packagesToNames(packages), []string{"com/example/demo"})
+		versions, err := pkg.Versions(ctx)
+		if err != nil {
+			t.Fatalf("Versions: %v", err)
+		}
+		assertNames(t, versionsToNames(versions), []string{"1.0.0"})
 	})
 }
 

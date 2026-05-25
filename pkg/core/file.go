@@ -5,7 +5,7 @@ import (
 	"io"
 )
 
-// File is a handle to a single blob within a Version.
+// File is a handle to a single blob at Store, Package, or Version level.
 type File interface {
 	// Name is the user-visible file name (for example
 	// "requests-2.31.0-py3-none-any.whl").
@@ -14,11 +14,12 @@ type File interface {
 	// Namespace returns the namespace of the owning Store.
 	Namespace() string
 
-	// Version returns the parent Version.
+	// Version returns the parent Version for version-level files. It returns nil
+	// for Store- and Package-level files.
 	Version() Version
 
-	// Package returns the grandparent Package. It is a convenience over
-	// f.Version().Package() and performs no I/O.
+	// Package returns the owning Package for Package- and Version-level files.
+	// It returns nil for Store-level files.
 	Package() Package
 
 	// Meta returns the File's metadata envelope (which carries the

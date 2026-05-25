@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
@@ -67,6 +68,9 @@ func TestServeDefaults(t *testing.T) {
 			ProxyPackumentCacheTTL: npm.DefaultProxyPackumentCacheTTL,
 			ProxyNegativeCacheTTL:  npm.DefaultProxyNegativeCacheTTL,
 		},
+		Maven: maven.Config{
+			MaxUploadBytes: maven.DefaultMaxUploadBytes,
+		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {
 		t.Errorf("config mismatch (-want +got):\n%s", diff)
@@ -85,6 +89,7 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 		"--enable-metrics=false",
 		"--pypi-max-upload-bytes", "1024",
 		"--pypi-simple-index-cache-ttl", "30s",
+		"--maven-max-upload-bytes", "4096",
 		"--authn-oidc-issuers", "https://a.example,https://b.example",
 		"--authn-oidc-audience", "open-artifact",
 	)
@@ -109,6 +114,9 @@ func TestServeFlagsOverrideDefaults(t *testing.T) {
 	if cfg.PyPI.SimpleIndexCacheTTL != 30*time.Second {
 		t.Errorf("PyPI.SimpleIndexCacheTTL = %d, want 30s in nanoseconds", cfg.PyPI.SimpleIndexCacheTTL)
 	}
+	if cfg.Maven.MaxUploadBytes != 4096 {
+		t.Errorf("Maven.MaxUploadBytes = %d, want 4096", cfg.Maven.MaxUploadBytes)
+	}
 	wantIssuers := []string{"https://a.example", "https://b.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("issuers mismatch (-want +got):\n%s", diff)
@@ -122,6 +130,7 @@ func TestServeEnvResolution(t *testing.T) {
 	t.Setenv("OPEN_ARTIFACT_LOG_FORMAT", "json")
 	t.Setenv("OPEN_ARTIFACT_PYPI_MAX_UPLOAD_BYTES", "2048")
 	t.Setenv("OPEN_ARTIFACT_PYPI_SIMPLE_INDEX_CACHE_TTL", "15s")
+	t.Setenv("OPEN_ARTIFACT_MAVEN_MAX_UPLOAD_BYTES", "8192")
 	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS", "https://env.example,https://two.example")
 	t.Setenv("OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE", "open-artifact")
 
@@ -143,6 +152,9 @@ func TestServeEnvResolution(t *testing.T) {
 	}
 	if cfg.PyPI.SimpleIndexCacheTTL != 15*time.Second {
 		t.Errorf("PyPI.SimpleIndexCacheTTL = %d, want 15s in nanoseconds", cfg.PyPI.SimpleIndexCacheTTL)
+	}
+	if cfg.Maven.MaxUploadBytes != 8192 {
+		t.Errorf("Maven.MaxUploadBytes = %d, want 8192", cfg.Maven.MaxUploadBytes)
 	}
 	wantIssuers := []string{"https://env.example", "https://two.example"}
 	if diff := cmp.Diff(wantIssuers, cfg.AuthnOIDCIssuers); diff != "" {
@@ -269,7 +281,23 @@ func TestServeHelpListsFlags(t *testing.T) {
 		t.Fatalf("execute serve --help: %v", err)
 	}
 	help := out.String()
-	for _, flag := range []string{"--bucket-url", "--bucket-prefix", "--port", "--log-level", "--repo-type", "--authn-oidc-issuers", "--pypi-max-upload-bytes", "--pypi-simple-index-cache-ttl"} {
+	for _, flag := range []string{
+		"--bucket-url",
+		"--bucket-prefix",
+		"--port",
+		"--log-level",
+		"--repo-type",
+		"--authn-oidc-issuers",
+		"--pypi-max-upload-bytes",
+		"--pypi-simple-index-cache-ttl",
+		"--pypi-proxy-index-cache-ttl",
+		"--pypi-proxy-negative-cache-ttl",
+		"--npm-max-upload-bytes",
+		"--npm-proxy-packument-memo-ttl",
+		"--npm-proxy-packument-cache-ttl",
+		"--npm-proxy-negative-cache-ttl",
+		"--maven-max-upload-bytes",
+	} {
 		if !strings.Contains(help, flag) {
 			t.Errorf("serve --help missing %q\n%s", flag, help)
 		}

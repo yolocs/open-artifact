@@ -53,16 +53,24 @@ within a bounded window (15s) before exiting.
 
 ## Data-plane-only flags (`serve`)
 
-These exist on `serve` only. They are **stubbed** today and fully consumed by
-later issues (auth: #7; format serving: #19–#25).
+These exist on `serve` only.
 
-| Flag                    | Env var                             | Default | Notes |
-| ----------------------- | ----------------------------------- | ------- | ----- |
-| `--repo-type`           | `OPEN_ARTIFACT_REPO_TYPE`           | _(empty)_ | Allowed: `pypi`, `npm`, `maven` (internal `echo` reserved for OIDC CI). |
-| `--disable-authn`       | `OPEN_ARTIFACT_DISABLE_AUTHN`       | `false` | Disables authentication; intended to log a warning. _(planned, #7)_ |
-| `--authn-kind`          | `OPEN_ARTIFACT_AUTHN_KIND`          | `oidc`  | Only `oidc` is supported. |
-| `--authn-oidc-issuers`  | `OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS`  | _(empty)_ | Comma-separated issuer URLs. |
-| `--authn-oidc-audience` | `OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE` | _(empty)_ | Expected token audience. |
+| Flag                            | Env var                                     | Default | Notes |
+| ------------------------------- | ------------------------------------------- | ------- | ----- |
+| `--repo-type`                   | `OPEN_ARTIFACT_REPO_TYPE`                   | _(empty)_ | Served today: `pypi`, `npm`, `maven`; internal `echo` is reserved for OIDC CI. |
+| `--disable-authn`               | `OPEN_ARTIFACT_DISABLE_AUTHN`               | `false` | Disables authentication. |
+| `--authn-kind`                  | `OPEN_ARTIFACT_AUTHN_KIND`                  | `oidc`  | Only `oidc` is supported. |
+| `--authn-oidc-issuers`          | `OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS`          | _(empty)_ | Comma-separated issuer URLs. |
+| `--authn-oidc-audience`         | `OPEN_ARTIFACT_AUTHN_OIDC_AUDIENCE`         | _(empty)_ | Expected token audience. |
+| `--pypi-max-upload-bytes`       | `OPEN_ARTIFACT_PYPI_MAX_UPLOAD_BYTES`       | `104857600` | Maximum PyPI multipart upload size; 0 uses the default cap. |
+| `--pypi-simple-index-cache-ttl` | `OPEN_ARTIFACT_PYPI_SIMPLE_INDEX_CACHE_TTL` | `1m` | Per-process PyPI project simple-index cache TTL; 0 disables caching. |
+| `--pypi-proxy-index-cache-ttl`  | `OPEN_ARTIFACT_PYPI_PROXY_INDEX_CACHE_TTL`  | `10s` | In-process PyPI proxy upstream-index memo TTL; 0 uses the default, negative disables caching. |
+| `--pypi-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_PYPI_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream PyPI 404 is remembered in proxy mode; 0 uses the default. |
+| `--npm-max-upload-bytes`        | `OPEN_ARTIFACT_NPM_MAX_UPLOAD_BYTES`        | `104857600` | Maximum npm publish body size; 0 uses the default cap. |
+| `--npm-proxy-packument-memo-ttl` | `OPEN_ARTIFACT_NPM_PROXY_PACKUMENT_MEMO_TTL` | `10s` | In-process npm proxy packument memo TTL; 0 uses the default, negative disables the memo. |
+| `--npm-proxy-packument-cache-ttl` | `OPEN_ARTIFACT_NPM_PROXY_PACKUMENT_CACHE_TTL` | `10m` | Durable npm proxy packument freshness window; 0 uses the default, negative uses snapshots only as stale fallback. |
+| `--npm-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_NPM_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream npm 404 is remembered in proxy mode; 0 uses the default. |
+| `--maven-max-upload-bytes`      | `OPEN_ARTIFACT_MAVEN_MAX_UPLOAD_BYTES`      | `104857600` | Maximum Maven artifact/metadata/checksum upload size; 0 uses the default cap. |
 
 ## Storage backends
 

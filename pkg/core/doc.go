@@ -14,4 +14,8 @@
 //	file := store.Package("requests").Version("2.31.0").
 //		File("requests-2.31.0-py3-none-any.whl")
 //	rc, err := file.Read(ctx)
+//
+// Files can live at Store, Package, or Version level. All three levels use the
+// same write, digest, metadata, and read semantics; the extra levels exist for
+// package formats with repository- or package-scoped metadata files.
 package core

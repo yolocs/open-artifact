@@ -28,6 +28,10 @@ const (
 	// cacheDir is the per-level cache directory (opaque to the listing verbs).
 	// Cache files live directly under it.
 	cacheDir = ".cache/"
+	// filesDir is the per-level file directory. Keeping files under a dot-entry
+	// prevents namespace files from looking like packages and package files from
+	// looking like versions.
+	filesDir = ".files/"
 )
 
 // scopePrefix returns the on-bucket prefix for a scope: "open-artifact/v1/<scope>/".
@@ -115,6 +119,34 @@ func tagPath(scope, pkg, tag string) string {
 	return packageTagsPrefix(scope, pkg) + encodeSegment(tag)
 }
 
+func filesPrefix(dir string) string {
+	return dir + filesDir
+}
+
+func levelFilePath(dir, name string) string {
+	return filesPrefix(dir) + encodeSegment(name)
+}
+
+func levelFileMetaPath(dir, name string) string {
+	return filesPrefix(dir) + metaFilePrefix + encodeSegment(name)
+}
+
+func storeFilePath(scope, file string) string {
+	return levelFilePath(scopePrefix(scope), file)
+}
+
+func storeFileMetaPath(scope, file string) string {
+	return levelFileMetaPath(scopePrefix(scope), file)
+}
+
+func packageFilePath(scope, pkg, file string) string {
+	return levelFilePath(packagePrefix(scope, pkg), file)
+}
+
+func packageFileMetaPath(scope, pkg, file string) string {
+	return levelFileMetaPath(packagePrefix(scope, pkg), file)
+}
+
 // versionPrefix returns the directory prefix for a version.
 func versionPrefix(scope, pkg, version string) string {
 	return packagePrefix(scope, pkg) + encodeSegment(version) + "/"
@@ -127,12 +159,12 @@ func versionMetaPath(scope, pkg, version string) string {
 
 // filePath returns the path of a file's blob.
 func filePath(scope, pkg, version, file string) string {
-	return versionPrefix(scope, pkg, version) + encodeSegment(file)
+	return levelFilePath(versionPrefix(scope, pkg, version), file)
 }
 
 // fileMetaPath returns the path of a file's .meta.<file> sidecar.
 func fileMetaPath(scope, pkg, version, file string) string {
-	return versionPrefix(scope, pkg, version) + metaFilePrefix + encodeSegment(file)
+	return levelFileMetaPath(versionPrefix(scope, pkg, version), file)
 }
 
 // cacheFilePath returns the path of a cache file's blob: <dir>.cache/<name>.
