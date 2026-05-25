@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -246,45 +245,21 @@ func (e *proxyEngine) download(w http.ResponseWriter, r *http.Request, ns string
 
 // streamAndCache streams the upstream artifact straight to the client while
 // teeing the same bytes into the Store as a real File — no full-artifact
-// buffering. The client is the primary consumer: a Store write failure is
-// swallowed so it cannot truncate the client (the response is governed by
-// upstream stream success). Conversely, if the client disconnects, the Store
-// write aborts cleanly (blobstore cancels the partial write), so no truncated
-// File is left to poison the cache. We do not verify the index-advertised
-// sha256 here — it shares the upstream's trust — but record it for clients to
-// verify end to end; the local File's own digest is authoritative.
+// buffering (see surface.TeeStreamToStore). The client is the primary consumer:
+// a Store write failure is swallowed so it cannot truncate the client (the
+// response is governed by upstream stream success). Conversely, if the client
+// disconnects, the Store write aborts cleanly (blobstore cancels the partial
+// write), so no truncated File is left to poison the cache. We do not verify the
+// index-advertised sha256 here — it shares the upstream's trust — but record it
+// for clients to verify end to end; the local File's own digest is authoritative.
 func (e *proxyEngine) streamAndCache(w http.ResponseWriter, r *http.Request, store core.Store, project, version, filename string, meta proxyFileMeta, sr *httpclient.StreamResponse) {
 	ctx := r.Context()
 
-	pr, pw := io.Pipe()
-	fillDone := make(chan error, 1)
-	go func() {
+	copyErr, fillErr := surface.TeeStreamToStore(w, sr.Body, "application/octet-stream", sr.ContentLength, func(src io.Reader) error {
 		ann := proxyFileAnnotations(project, version, filename, meta, e.now().UTC())
-		_, err := store.Package(project).Version(version).AddFile(ctx, filename, pr, core.WithAnnotations(ann))
-		// Unblock the writer side: once AddFile stops reading (success or
-		// failure), further tee writes must not deadlock — they return this err
-		// and are swallowed by storeTee.
-		_ = pr.CloseWithError(err)
-		fillDone <- err
-	}()
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	if sr.ContentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(sr.ContentLength, 10))
-	}
-	w.WriteHeader(http.StatusOK)
-
-	tee := &storeTee{w: pw}
-	_, copyErr := io.Copy(w, io.TeeReader(sr.Body, tee))
-	// Signal end-of-stream to the Store writer: clean EOF on success, the error
-	// otherwise so the partial write aborts rather than committing.
-	if copyErr != nil {
-		_ = pw.CloseWithError(copyErr)
-	} else {
-		_ = pw.Close()
-	}
-
-	fillErr := <-fillDone
+		_, err := store.Package(project).Version(version).AddFile(ctx, filename, src, core.WithAnnotations(ann))
+		return err
+	})
 	switch {
 	case copyErr != nil:
 		// The client read failed mid-stream (disconnect) or upstream ended early.
@@ -303,25 +278,6 @@ func (e *proxyEngine) streamAndCache(w http.ResponseWriter, r *http.Request, sto
 		// with hosted uploads (best-effort, metadata only).
 		e.recordParents(ctx, store, project, version)
 	}
-}
-
-// storeTee forwards bytes to the Store pipe but never propagates a write error
-// back to the TeeReader, so a Store-side failure cannot truncate the client
-// stream. The pipe is closed with the error by the AddFile goroutine; subsequent
-// writes here return that error and are swallowed.
-type storeTee struct {
-	w      io.Writer
-	failed bool
-}
-
-func (t *storeTee) Write(p []byte) (int, error) {
-	if t.failed {
-		return len(p), nil
-	}
-	if _, err := t.w.Write(p); err != nil {
-		t.failed = true
-	}
-	return len(p), nil
 }
 
 // recordParents writes the package and version metadata envelopes after a

@@ -69,6 +69,42 @@ func TestNPMDistTags(t *testing.T) {
 	}
 }
 
+// TestNPMProxyInstall drives `npm install` through a proxy namespace whose
+// upstream is an in-process hosted open-artifact surface (no Docker, no public
+// registry): a package is published to the hosted surface, then installed
+// through the proxy, which pulls the packument and tarball through and caches
+// them. A second install (from a fresh consumer dir) is served from the proxy's
+// caches.
+func TestNPMProxyInstall(t *testing.T) {
+	t.Parallel()
+
+	bin := requireNPM(t)
+
+	// Hosted "upstream": publish a real (npm-produced) tarball to /team-a.
+	hosted := newHarness(t, memblob.OpenBucket(nil), npm.Config{})
+	hostedClient := &npmClient{bin: bin, userconfig: writeNpmrc(t, hosted.server.URL+"/team-a/")}
+	pkgDir := writePackage(t, "left-pad-demo", "1.0.0")
+	hostedClient.run(t, pkgDir, "publish")
+
+	// Proxy whose upstream is the hosted namespace.
+	proxy := newProxyHarness(t, memblob.OpenBucket(nil), npm.Config{},
+		proxyNamespace("team-proxy", hosted.server.URL+"/team-a"))
+	proxyClient := &npmClient{bin: bin, userconfig: writeNpmrc(t, proxy.server.URL+"/team-proxy/")}
+
+	installDir := writePackage(t, "consumer", "0.0.0")
+	proxyClient.run(t, installDir, "install", "--no-audit", "--no-fund", "left-pad-demo@1.0.0")
+	if _, err := os.Stat(filepath.Join(installDir, "node_modules", "left-pad-demo", "package.json")); err != nil {
+		t.Fatalf("proxy install did not materialize package: %v", err)
+	}
+
+	// A second install (fresh consumer) is served from the proxy's caches.
+	installDir2 := writePackage(t, "consumer2", "0.0.0")
+	proxyClient.run(t, installDir2, "install", "--no-audit", "--no-fund", "left-pad-demo@1.0.0")
+	if _, err := os.Stat(filepath.Join(installDir2, "node_modules", "left-pad-demo", "package.json")); err != nil {
+		t.Fatalf("second proxy install did not materialize package: %v", err)
+	}
+}
+
 // npmClient bundles a running harness and the npm CLI configured to talk to it.
 type npmClient struct {
 	bin        string

@@ -90,6 +90,9 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "in-process PyPI proxy upstream-index cache TTL (burst absorber); 0 uses the default, negative disables caching")
 	f.Duration("pypi-proxy-negative-cache-ttl", pypi.DefaultProxyNegativeCacheTTL, "how long an upstream PyPI 404 is remembered in proxy mode; 0 uses the default")
 	f.Int64("npm-max-upload-bytes", npm.DefaultMaxUploadBytes, "maximum npm publish body size in bytes; 0 uses the default cap")
+	f.Duration("npm-proxy-packument-memo-ttl", npm.DefaultProxyPackumentMemoTTL, "in-process npm proxy packument memo TTL (burst absorber); 0 uses the default, negative disables the memo")
+	f.Duration("npm-proxy-packument-cache-ttl", npm.DefaultProxyPackumentCacheTTL, "durable npm proxy packument freshness window; 0 uses the default, negative serves the durable snapshot only as a stale fallback")
+	f.Duration("npm-proxy-negative-cache-ttl", npm.DefaultProxyNegativeCacheTTL, "how long an upstream npm 404 is remembered in proxy mode; 0 uses the default")
 }
 
 // newViper builds a viper bound to cmd's flags with OPEN_ARTIFACT env
@@ -138,6 +141,9 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.PyPI.ProxyIndexCacheTTL = v.GetDuration("pypi-proxy-index-cache-ttl")
 		cfg.PyPI.ProxyNegativeCacheTTL = v.GetDuration("pypi-proxy-negative-cache-ttl")
 		cfg.NPM.MaxUploadBytes = v.GetInt64("npm-max-upload-bytes")
+		cfg.NPM.ProxyPackumentMemoTTL = v.GetDuration("npm-proxy-packument-memo-ttl")
+		cfg.NPM.ProxyPackumentCacheTTL = v.GetDuration("npm-proxy-packument-cache-ttl")
+		cfg.NPM.ProxyNegativeCacheTTL = v.GetDuration("npm-proxy-negative-cache-ttl")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -190,6 +196,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.NPM.MaxUploadBytes < 0 {
 			errs = append(errs, fmt.Errorf("invalid --npm-max-upload-bytes %d: must be >= 0", c.NPM.MaxUploadBytes))
+		}
+		if c.NPM.ProxyNegativeCacheTTL < 0 {
+			errs = append(errs, fmt.Errorf("invalid --npm-proxy-negative-cache-ttl %s: must be >= 0", c.NPM.ProxyNegativeCacheTTL))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}

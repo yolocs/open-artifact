@@ -462,21 +462,28 @@ func TestPingAndRoot(t *testing.T) {
 	}
 }
 
-func TestProxyModeRejected(t *testing.T) {
+func TestProxyModeRejectsWrites(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, memblob.OpenBucket(nil), npm.Config{})
-	// Writes in proxy mode are rejected (405); reads are not implemented (501, #22).
+	// Writes in proxy mode are rejected with 405 (Allow: GET, HEAD); pull-through
+	// read behavior is exercised against a fake upstream in proxy_test.go.
 	pub := publish(t, h, "team-proxy", "left-pad", publishDoc("left-pad", "1.0.0", []byte("v1"), nil))
 	if pub.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("proxy publish = %d, want 405: %s", pub.StatusCode, readResp(t, pub))
 	}
-	_ = readResp(t, pub)
-	read := do(t, h, http.MethodGet, "/team-proxy/left-pad")
-	if read.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("proxy read = %d, want 501: %s", read.StatusCode, readResp(t, read))
+	if allow := pub.Header.Get("Allow"); allow != "GET, HEAD" {
+		t.Fatalf("proxy publish Allow = %q, want \"GET, HEAD\"", allow)
 	}
-	_ = readResp(t, read)
+	_ = readResp(t, pub)
+
+	for _, method := range []string{http.MethodPut, http.MethodPost, http.MethodDelete} {
+		resp := do(t, h, method, "/team-proxy/-/package/left-pad/dist-tags/beta")
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("proxy dist-tag %s = %d, want 405: %s", method, resp.StatusCode, readResp(t, resp))
+		}
+		_ = readResp(t, resp)
+	}
 }
 
 func TestAuthorizationAndIsolation(t *testing.T) {
