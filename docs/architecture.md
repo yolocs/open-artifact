@@ -10,9 +10,10 @@ for how to run and configure the binary see
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
 logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
-proxy serving, and the shared proxy primitives exist today; the npm/Maven
-surfaces are described here as the design they are being built toward. Where it
-matters, sections note what is implemented versus planned.
+proxy serving, the npm hosted surface, and the shared proxy primitives exist
+today; the npm proxy and the Maven surfaces are described here as the design
+they are being built toward. Where it matters, sections note what is
+implemented versus planned.
 
 ## What this project is
 
@@ -126,7 +127,7 @@ pkg/
     filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     pypi/            ← PEP 503/691 hosted + pull-through proxy
-    npm/             ← npm registry hosted + proxy (planned)
+    npm/             ← npm registry hosted; pull-through proxy (planned)
     maven/           ← Maven 2 layout hosted + proxy (planned)
 docs/
 ```
@@ -543,6 +544,58 @@ the configured base and appending the PyPI layout (`/simple/`,
 
 The simple **root** (`/simple/`) in proxy mode lists only locally cached
 projects rather than proxying the upstream's full registry listing.
+
+### npm hosted surface
+
+A hosted npm namespace (`pkg/surface/npm`) speaks the npm registry protocol
+over the same namespace-scoped `core.Store`, composing the shared `surface`
+helpers exactly as PyPI does — only the wire protocol and codec are
+npm-specific. Routes live under `/{namespace}`: packument read and publish at
+`/{name}` and `/@{scope}/{name}`; tarball download at `…/-/{file}.tgz`;
+dist-tags under `/-/package/{name}/dist-tags[/{tag}]`; and the `/-/ping` and
+registry-root probes. Scoped names arrive either as `@scope/name` or
+`%2f`-encoded; both decode to the same route.
+
+- **Codec.** The format owns the package-name mapping: an unscoped `left-pad`
+  becomes the core package `u/left-pad` and a scoped `@scope/pkg` becomes
+  `s/scope/pkg`. `blobstore` escapes the embedded `/` into a single path-safe
+  bucket segment and round-trips it through listing, so the two namespaces
+  never collide and never begin with a reserved `.`. The original npm name is
+  recorded in the package/version annotations (`npm:name`). Names are validated
+  to npm's rules (≤214 chars, lowercase, `[a-z0-9._-]` per segment, no leading
+  `.`/`_`, no `~`/space/traversal); the version string is used verbatim as the
+  core version.
+- **Publish.** `PUT /{name}` carries the CouchDB-shaped document (`name`,
+  `versions`, `_attachments`, optional `dist-tags`). The body is capped by
+  `--npm-max-upload-bytes`; v1 accepts exactly one version per publish. The
+  surface decodes the base64 attachment, recomputes the SHA-1 hex and SHA-512
+  SRI and compares them to the declared `dist.shasum`/`dist.integrity` when
+  present (mismatch → 422), rewrites `dist.tarball` to point back at
+  open-artifact, then stores two files under the core version: the tarball
+  (original `<unscoped>-<version>.tgz` name) and `package.json` (the per-version
+  metadata used to rebuild packuments). The tarball write is the immutability
+  gate — a republish of an existing version collides as 409. Dist-tags from the
+  request are applied via `Package.SetTag`, defaulting `latest` to the published
+  version when the client sent none. Publish is a pure write path (no reads), so
+  a write-only subject can publish.
+- **Packument.** `GET /{name}` lists the package's versions, reads each stored
+  `package.json`, rewrites every `dist.tarball` to the current request host and
+  namespace (honoring `X-Forwarded-Proto/Host`), and assembles `_id`, `name`,
+  `versions`, `dist-tags`, and best-effort `time` (from the `npm:uploaded_at`
+  annotation). A missing package is 404.
+- **Tarball download.** The version is derived from the npm filename convention
+  (`<unscoped>-<version>.tgz`) for a direct lookup, falling back to a scan of the
+  package's versions, then served through the shared `RedirectOrStreamFile`
+  (signed-URL redirect when the backend supports it, else streamed).
+- **Dist-tags.** `GET …/dist-tags` resolves every tag to its target version;
+  `PUT`/`POST …/dist-tags/{tag}` sets one (404 if the target version is absent,
+  so no dangling tags — this read+write check means dist-tag mutation needs both
+  reader and writer policy); `DELETE` returns 501 in v1.
+- **Modes/auth.** Reads authorize `OpRead`, publish and dist-tag mutation
+  `OpWrite`, all enforced below the surface inside the guarded Store. Proxy
+  namespaces are handled separately (the npm proxy is planned): until then a
+  proxy-mode write returns 405-equivalent rejection and reads map to
+  `ErrUnsupported` (501).
 
 ## gocloud.dev/blob notes
 

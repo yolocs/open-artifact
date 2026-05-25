@@ -15,6 +15,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/observability"
 	"github.com/yolocs/open-artifact/pkg/surface/echo"
+	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
@@ -84,6 +85,9 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 	}
 	if cfg.RepoType == "pypi" {
 		mux.Handle("/", observability.WrapWithFormat("pypi", pypi.Handler(reg, authn, cfg.PyPI)))
+	}
+	if cfg.RepoType == "npm" {
+		mux.Handle("/", observability.WrapWithFormat("npm", npm.Handler(reg, authn, cfg.NPM)))
 	}
 	return mux
 }

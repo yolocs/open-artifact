@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
@@ -59,6 +60,9 @@ func TestServeDefaults(t *testing.T) {
 			SimpleIndexCacheTTL:   60 * time.Second,
 			ProxyIndexCacheTTL:    pypi.DefaultProxyIndexCacheTTL,
 			ProxyNegativeCacheTTL: pypi.DefaultProxyNegativeCacheTTL,
+		},
+		NPM: npm.Config{
+			MaxUploadBytes: npm.DefaultMaxUploadBytes,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {
