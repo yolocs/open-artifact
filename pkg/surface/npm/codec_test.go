@@ -1,6 +1,11 @@
 package npm
 
 import (
+	"crypto"
+	"crypto/sha1"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -119,24 +124,48 @@ func TestValidateVersionTagFilename(t *testing.T) {
 	}
 }
 
-func TestVerifyIntegrity(t *testing.T) {
+func TestExpectedDigests(t *testing.T) {
 	t.Parallel()
 
 	tarball := []byte("the tarball bytes")
-	good := sha1Hex(tarball)
-	goodSRI := sha512SRI(tarball)
+	sha1sum := sha1.Sum(tarball)
+	sha512sum := sha512.Sum512(tarball)
+	shasum := hex.EncodeToString(sha1sum[:])
+	integrity := "sha512-" + base64.StdEncoding.EncodeToString(sha512sum[:])
 
-	if err := verifyIntegrity(tarball, good, goodSRI); err != nil {
-		t.Fatalf("verifyIntegrity(matching): %v", err)
+	// Both declarations present -> two checks with the raw digest bytes.
+	got, err := expectedDigests(map[string]any{"shasum": shasum, "integrity": integrity})
+	if err != nil {
+		t.Fatalf("expectedDigests: %v", err)
 	}
-	// Absent declarations are accepted (trusted, recomputed and recorded later).
-	if err := verifyIntegrity(tarball, "", ""); err != nil {
-		t.Fatalf("verifyIntegrity(empty): %v", err)
+	if len(got) != 2 {
+		t.Fatalf("got %d digests, want 2", len(got))
 	}
-	if err := verifyIntegrity(tarball, "deadbeef", ""); !errors.Is(err, core.ErrDigestMismatch) {
-		t.Fatalf("shasum mismatch error = %v, want ErrDigestMismatch", err)
+	want := []core.ExpectedDigest{
+		{Hash: crypto.SHA1, Sum: sha1sum[:]},
+		{Hash: crypto.SHA512, Sum: sha512sum[:]},
 	}
-	if err := verifyIntegrity(tarball, "", "sha512-AAAA"); !errors.Is(err, core.ErrDigestMismatch) {
-		t.Fatalf("integrity mismatch error = %v, want ErrDigestMismatch", err)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("digests (-want +got):\n%s", diff)
+	}
+
+	// Absent dist / values -> no checks.
+	if got, err := expectedDigests(nil); err != nil || got != nil {
+		t.Fatalf("expectedDigests(nil) = %v, %v; want nil, nil", got, err)
+	}
+
+	// A non-sha512 integrity is ignored (npm always sends sha512).
+	if got, err := expectedDigests(map[string]any{"integrity": "sha1-AAAA"}); err != nil || got != nil {
+		t.Fatalf("expectedDigests(sha1 integrity) = %v, %v; want nil, nil", got, err)
+	}
+
+	// Malformed declarations are rejected.
+	for _, dist := range []map[string]any{
+		{"shasum": "nothex!!"},
+		{"integrity": "sha512-not base64"},
+	} {
+		if _, err := expectedDigests(dist); !errors.Is(err, errBadDigest) {
+			t.Fatalf("expectedDigests(%v) err = %v, want errBadDigest", dist, err)
+		}
 	}
 }

@@ -1,8 +1,11 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
+	_ "crypto/sha1" // register SHA-1 for ExpectedDigest verification
 	"crypto/sha256"
+	_ "crypto/sha512" // register SHA-512 for ExpectedDigest verification
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -575,6 +578,13 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 	return f, nil
 }
 
+// expectedVerifier pairs a running hash with the caller-declared digest it must
+// equal once the body is fully streamed.
+type expectedVerifier struct {
+	sum  hash.Hash
+	want []byte
+}
+
 // writeFile streams body to blobKey while computing a rolling SHA256, then
 // writes the .meta sidecar at metaKey carrying the digest and timestamps. With
 // AllowOverwrite=false a pre-existing blob yields ErrAlreadyExists. It is the
@@ -605,12 +615,34 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	}
 
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(w, h), body)
+	writers := []io.Writer{w, h}
+	verifiers := make([]expectedVerifier, 0, len(cfg.Expected))
+	for _, e := range cfg.Expected {
+		if !e.Hash.Available() {
+			cancelWrite()
+			_ = s.closeWriter(w)
+			return core.Meta{}, fmt.Errorf("blobstore: hash %v unavailable: %w", e.Hash, core.ErrUnsupported)
+		}
+		vh := e.Hash.New()
+		writers = append(writers, vh)
+		verifiers = append(verifiers, expectedVerifier{sum: vh, want: e.Sum})
+	}
+
+	n, err := io.Copy(io.MultiWriter(writers...), body)
 	if err != nil {
 		// Abort the in-flight write so no partial blob is committed.
 		cancelWrite()
 		_ = s.closeWriter(w)
 		return core.Meta{}, fmt.Errorf("blobstore: stream %q: %w", blobKey, mapErr(err))
+	}
+	// Verify the caller-declared digests before committing; a mismatch aborts
+	// the write so a corrupt upload never leaves a servable blob.
+	for _, v := range verifiers {
+		if !bytes.Equal(v.sum.Sum(nil), v.want) {
+			cancelWrite()
+			_ = s.closeWriter(w)
+			return core.Meta{}, core.ErrDigestMismatch
+		}
 	}
 	if err := s.closeWriter(w); err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapErr(err))

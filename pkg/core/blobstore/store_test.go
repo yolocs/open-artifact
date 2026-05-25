@@ -2,6 +2,8 @@ package blobstore
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -157,6 +159,37 @@ func TestAddFileReadFileRoundTrip(t *testing.T) {
 		}
 		if meta.Size != int64(len(body)) {
 			t.Errorf("size = %d, want %d", meta.Size, len(body))
+		}
+	})
+}
+
+func TestAddFileVerifiesExpectedDigests(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		s, err := NewWithBucket(b, testScope)
+		if err != nil {
+			t.Fatalf("NewWithBucket: %v", err)
+		}
+		body := []byte("verify me")
+		sum := sha1.Sum(body)
+
+		// A matching declared digest commits normally.
+		if _, err := s.Package("p").Version("1.0.0").AddFile(ctx, "ok.bin", bytes.NewReader(body),
+			core.WithExpectedDigests(core.ExpectedDigest{Hash: crypto.SHA1, Sum: sum[:]})); err != nil {
+			t.Fatalf("AddFile (matching digest): %v", err)
+		}
+
+		// A mismatch aborts with ErrDigestMismatch and commits nothing.
+		bad := s.Package("p").Version("2.0.0").File("bad.bin")
+		_, err = s.Package("p").Version("2.0.0").AddFile(ctx, "bad.bin", bytes.NewReader(body),
+			core.WithExpectedDigests(core.ExpectedDigest{Hash: crypto.SHA1, Sum: make([]byte, 20)}))
+		if !errors.Is(err, core.ErrDigestMismatch) {
+			t.Fatalf("AddFile (mismatch) err = %v, want ErrDigestMismatch", err)
+		}
+		if exists, _ := bad.Exists(ctx); exists {
+			t.Fatalf("mismatched upload left a committed blob")
 		}
 	})
 }

@@ -440,19 +440,9 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request, ns string, pn 
 		surface.WriteError(w, http.StatusBadRequest, "missing tarball attachment")
 		return
 	}
-	tarball, err := base64.StdEncoding.DecodeString(strings.TrimSpace(att.Data))
+	expected, err := expectedDigests(dist)
 	if err != nil {
-		surface.WriteError(w, http.StatusBadRequest, "invalid base64 tarball attachment")
-		return
-	}
-
-	declaredShasum, declaredIntegrity := "", ""
-	if dist != nil {
-		declaredShasum, _ = dist["shasum"].(string)
-		declaredIntegrity, _ = dist["integrity"].(string)
-	}
-	if err := verifyIntegrity(tarball, declaredShasum, declaredIntegrity); err != nil {
-		surface.WriteStoreError(w, r, err)
+		surface.WriteError(w, http.StatusBadRequest, "invalid integrity declaration")
 		return
 	}
 
@@ -470,34 +460,46 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request, ns string, pn 
 		return
 	}
 
+	// Stream the base64 attachment straight into the Store rather than holding
+	// the decoded tarball in memory; the Store hashes it during the write and
+	// verifies the declared SHA-1/SHA-512 before committing. This is also the
+	// immutability gate: a republish of an existing version collides as 409,
+	// and a corrupt upload aborts without leaving a servable blob.
 	uploadedAt := h.now().UTC().Format(time.RFC3339Nano)
+	pkg := store.Package(pn.Core())
+	ver := pkg.Version(version)
+	tarballBody := base64.NewDecoder(base64.StdEncoding, strings.NewReader(strings.TrimSpace(att.Data)))
+	if _, err := ver.AddFile(r.Context(), tarballName, tarballBody,
+		core.WithExpectedDigests(expected...),
+		core.WithAnnotations(map[string]any{
+			"npm:name":        pn.Original,
+			"npm:version":     version,
+			"npm:filename":    tarballName,
+			"npm:uploaded_at": uploadedAt,
+		}),
+	); err != nil {
+		var corrupt base64.CorruptInputError
+		if errors.As(err, &corrupt) {
+			surface.WriteError(w, http.StatusBadRequest, "invalid base64 tarball attachment")
+			return
+		}
+		surface.WriteStoreError(w, r, err)
+		return
+	}
+
+	// Record the package/version envelopes. Ordering after the tarball keeps a
+	// rejected upload from leaving any package or version metadata behind.
 	if _, err := store.AddPackage(r.Context(), pn.Core(), core.WithAnnotations(map[string]any{
 		"npm:name": pn.Original,
 	})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	pkg := store.Package(pn.Core())
 	if _, err := pkg.AddVersion(r.Context(), version, core.WithAnnotations(map[string]any{
 		"npm:name":        pn.Original,
 		"npm:version":     version,
 		"npm:uploaded_at": uploadedAt,
 	})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
-		surface.WriteStoreError(w, r, err)
-		return
-	}
-
-	ver := pkg.Version(version)
-	// The tarball write gates immutability: a republish of an existing version
-	// collides here and surfaces as 409.
-	if _, err := ver.AddFile(r.Context(), tarballName, bytes.NewReader(tarball), core.WithAnnotations(map[string]any{
-		"npm:name":        pn.Original,
-		"npm:version":     version,
-		"npm:filename":    tarballName,
-		"npm:shasum":      sha1Hex(tarball),
-		"npm:integrity":   sha512SRI(tarball),
-		"npm:uploaded_at": uploadedAt,
-	})); err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
 	}

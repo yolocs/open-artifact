@@ -151,8 +151,13 @@ rc, err := file.Read(ctx)
 Each noun exposes `Namespace()` and no-I/O parent accessors (`Store()`,
 `Package()`, `Version()`) plus the read/write verbs for its level.
 Creation-time options flow through the variadic `CreateOption`
-(`WithAnnotations`); implementations resolve them with
-`core.NewCreateConfig`. A version "exists" once anything is written under it —
+(`WithAnnotations`, `WithAllowOverwrite`, `WithExpectedDigests`);
+implementations resolve them with `core.NewCreateConfig`.
+`WithExpectedDigests` lets a surface hand the Store caller-declared content
+hashes (e.g. an npm `shasum`/`integrity`) that the Store verifies *while
+streaming* the body and **before committing**, so a corrupt upload aborts
+without leaving a servable blob and the surface never has to buffer the body to
+hash it. A version "exists" once anything is written under it —
 partial publishes are observable, matching real PyPI/npm.
 
 ## The Store (implemented)
@@ -608,10 +613,11 @@ registry-root probes. Scoped names arrive either as `@scope/name` or
   layer only — never in `pkg/core`.
 - The command owns bucket lifecycle: open once at startup, close on shutdown.
   `blobstore.Store` must not close a caller-owned bucket.
-- Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path;
-  write the `.meta.<file>` sidecar after the writer closes successfully. The
-  writer is created under a cancelable child context; on a mid-stream read error
-  the write is **cancelled** before `Close` (for memblob/fileblob a plain
+- Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path
+  (plus any `WithExpectedDigests` hashes, compared before commit so a declared
+  mismatch aborts the write); write the `.meta.<file>` sidecar after the writer
+  closes successfully. The writer is created under a cancelable child context;
+  on a mid-stream read error the write is **cancelled** before `Close` (for memblob/fileblob a plain
   `Close` would commit the bytes written so far as a complete object), so a body
   that ends early — a disconnected upload, an interrupted proxy stream — never
   leaves a partial, servable blob.

@@ -1,11 +1,11 @@
 package npm
 
 import (
-	"crypto/sha1"
-	"crypto/sha512"
+	"crypto"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
@@ -199,32 +199,37 @@ func ValidateTarballName(filename string) error {
 	return nil
 }
 
-// sha1Hex returns the lowercase hex SHA-1 of b, matching npm's dist.shasum.
-func sha1Hex(b []byte) string {
-	sum := sha1.Sum(b)
-	return hex.EncodeToString(sum[:])
-}
+// errBadDigest marks a malformed publisher-declared digest (bad hex shasum or
+// SRI), distinct from a digest that is well-formed but does not match the bytes
+// (core.ErrDigestMismatch, raised by the Store during the streamed write).
+var errBadDigest = errors.New("npm: malformed declared digest")
 
-// sha512SRI returns the Subresource Integrity string npm stores in
-// dist.integrity: "sha512-" + base64(standard) of the SHA-512 digest.
-func sha512SRI(b []byte) string {
-	sum := sha512.Sum512(b)
-	return "sha512-" + base64.StdEncoding.EncodeToString(sum[:])
-}
-
-// verifyIntegrity recomputes the SHA-1 and SHA-512 of the decoded tarball and
-// compares them against the publisher-declared dist.shasum / dist.integrity
-// when present. A mismatch is core.ErrDigestMismatch.
-func verifyIntegrity(tarball []byte, declaredShasum, declaredIntegrity string) error {
-	if s := strings.TrimSpace(declaredShasum); s != "" {
-		if got := sha1Hex(tarball); !strings.EqualFold(got, s) {
-			return fmt.Errorf("%w: shasum %s != declared %s", core.ErrDigestMismatch, got, s)
+// expectedDigests translates a version's dist.shasum (hex SHA-1) and
+// dist.integrity ("sha512-<base64>") into core.ExpectedDigest checks the Store
+// verifies while streaming the tarball. Absent values are skipped; an integrity
+// hash other than sha512 is ignored (npm always uses sha512). A malformed
+// declared value returns errBadDigest.
+func expectedDigests(dist map[string]any) ([]core.ExpectedDigest, error) {
+	if dist == nil {
+		return nil, nil
+	}
+	var out []core.ExpectedDigest
+	if s, _ := dist["shasum"].(string); strings.TrimSpace(s) != "" {
+		raw, err := hex.DecodeString(strings.TrimSpace(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: shasum %q", errBadDigest, s)
+		}
+		out = append(out, core.ExpectedDigest{Hash: crypto.SHA1, Sum: raw})
+	}
+	if s, _ := dist["integrity"].(string); strings.TrimSpace(s) != "" {
+		s = strings.TrimSpace(s)
+		if rest, ok := strings.CutPrefix(s, "sha512-"); ok {
+			raw, err := base64.StdEncoding.DecodeString(rest)
+			if err != nil {
+				return nil, fmt.Errorf("%w: integrity %q", errBadDigest, s)
+			}
+			out = append(out, core.ExpectedDigest{Hash: crypto.SHA512, Sum: raw})
 		}
 	}
-	if s := strings.TrimSpace(declaredIntegrity); s != "" {
-		if got := sha512SRI(tarball); got != s {
-			return fmt.Errorf("%w: integrity %s != declared %s", core.ErrDigestMismatch, got, s)
-		}
-	}
-	return nil
+	return out, nil
 }

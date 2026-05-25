@@ -43,8 +43,11 @@ metadata used to rebuild packuments.
 1. Caps the body with `--npm-max-upload-bytes`.
 2. Verifies the URL package matches the document `name` (v1 accepts exactly one
    version per publish).
-3. Decodes the tarball and, when the publisher declared them, verifies the
-   SHA-1 `dist.shasum` and SHA-512 `dist.integrity` (a mismatch returns `422`).
+3. Streams the base64 tarball attachment straight into storage; the Store
+   computes the SHA-1 and SHA-512 during the write and, when the publisher
+   declared `dist.shasum`/`dist.integrity`, verifies them before committing — a
+   mismatch aborts the write and returns `422`, leaving nothing stored. The
+   decoded tarball is never held whole in memory.
 4. Rewrites `dist.tarball` to point back at open-artifact, never at an upstream
    or publisher-provided host.
 5. Stores the tarball and `package.json`, then applies dist-tags (defaulting
