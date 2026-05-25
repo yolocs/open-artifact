@@ -286,7 +286,7 @@ func (h *handler) distTagsListRoute(w http.ResponseWriter, r *http.Request) {
 		surface.WriteStoreError(w, r, core.ErrNotFound)
 		return
 	}
-	tags, err := readDistTags(r.Context(), pkg)
+	tags, err := pkg.TagTargets(r.Context())
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
@@ -327,8 +327,11 @@ func (h *handler) distTagsRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r = surface.WithMaxBody(w, r, 64<<10)
-	raw, err := io.ReadAll(r.Body)
+	raw, tooLarge, err := surface.ReadCappedBody(w, r, 64<<10)
+	if tooLarge {
+		surface.WriteError(w, http.StatusRequestEntityTooLarge, "dist-tag body too large")
+		return
+	}
 	if err != nil {
 		surface.WriteError(w, http.StatusBadRequest, "invalid dist-tag body")
 		return
@@ -353,7 +356,7 @@ func (h *handler) distTagsRoute(w http.ResponseWriter, r *http.Request) {
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	tags, err := readDistTags(r.Context(), pkg)
+	tags, err := pkg.TagTargets(r.Context())
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
@@ -381,13 +384,12 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request, ns string, pn 
 		return
 	}
 
-	r = surface.WithMaxBody(w, r, h.opts.uploadLimit())
-	body, err := io.ReadAll(r.Body)
+	body, tooLarge, err := surface.ReadCappedBody(w, r, h.opts.uploadLimit())
+	if tooLarge {
+		surface.WriteError(w, http.StatusRequestEntityTooLarge, "upload too large")
+		return
+	}
 	if err != nil {
-		if strings.Contains(err.Error(), "request body too large") {
-			surface.WriteError(w, http.StatusRequestEntityTooLarge, "upload too large")
-			return
-		}
 		surface.WriteError(w, http.StatusBadRequest, "invalid publish body")
 		return
 	}
@@ -488,7 +490,6 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request, ns string, pn 
 		"npm:filename":    tarballName,
 		"npm:shasum":      sha1Hex(tarball),
 		"npm:integrity":   sha512SRI(tarball),
-		"npm:length":      len(tarball),
 		"npm:uploaded_at": uploadedAt,
 	})); err != nil {
 		surface.WriteStoreError(w, r, err)
@@ -583,7 +584,7 @@ func (h *handler) packument(w http.ResponseWriter, r *http.Request, ns string, p
 		surface.WriteStoreError(w, r, core.ErrNotFound)
 		return
 	}
-	tags, err := readDistTags(r.Context(), pkg)
+	tags, err := pkg.TagTargets(r.Context())
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
@@ -638,23 +639,6 @@ func rewriteTarball(meta map[string]any, base, ns string, pn PackageName) {
 		return
 	}
 	dist["tarball"] = tarballURL(base, ns, pn, filename)
-}
-
-// readDistTags resolves every dist-tag on the package to its target version.
-func readDistTags(ctx context.Context, pkg core.Package) (map[string]string, error) {
-	tags, err := pkg.Tags(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(tags))
-	for _, t := range tags {
-		ref, err := t.Ref(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out[t.Name()] = ref.Name()
-	}
-	return out, nil
 }
 
 // findTarball locates the File holding filename. The npm convention names a

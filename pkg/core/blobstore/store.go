@@ -404,6 +404,30 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	return out, nil
 }
 
+func (p *pkg) TagTargets(ctx context.Context) (map[string]string, error) {
+	if p.nameErr != nil {
+		return nil, p.nameErr
+	}
+	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	names, err := s.listChildNames(ctx, packageTagsPrefix(s.scope, p.name))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(names))
+	for _, n := range names {
+		tag := decodeSegment(n)
+		target, err := s.readTagTarget(ctx, p.name, tag)
+		if err != nil {
+			return nil, err
+		}
+		out[tag] = target
+	}
+	return out, nil
+}
+
 func (p *pkg) SetTag(ctx context.Context, name, target string) error {
 	if err := firstErr(p.nameErr, validateName(name), validateName(target)); err != nil {
 		return err
@@ -549,7 +573,8 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	}
 
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
+	n, err := io.Copy(io.MultiWriter(w, h), body)
+	if err != nil {
 		// Abort the in-flight write so no partial blob is committed.
 		cancelWrite()
 		_ = s.closeWriter(w)
@@ -562,6 +587,7 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	now := s.now().UTC()
 	meta := core.Meta{
 		Digest:      digestOf(h),
+		Size:        n,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		Annotations: cfg.Annotations,
@@ -691,6 +717,7 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 
 	return core.Meta{
 		Digest:    digestOf(h),
+		Size:      attrs.Size,
 		UpdatedAt: attrs.ModTime.UTC(),
 	}, nil
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -250,6 +251,12 @@ func TestPublishPackumentAndDownload(t *testing.T) {
 					dl := do(t, h, http.MethodGet, "/team-a"+tarballPath(tc.pkg, "1.0.0"))
 					if dl.StatusCode != http.StatusOK {
 						t.Fatalf("download status = %d: %s", dl.StatusCode, readResp(t, dl))
+					}
+					if got := dl.Header.Get("Content-Length"); got != strconv.Itoa(len(tarball)) {
+						t.Fatalf("Content-Length = %q, want %d", got, len(tarball))
+					}
+					if dl.Header.Get("ETag") == "" {
+						t.Fatalf("download missing ETag")
 					}
 					if diff := cmp.Diff(tarball, []byte(readResp(t, dl))); diff != "" {
 						t.Fatalf("tarball body mismatch (-want +got):\n%s", diff)

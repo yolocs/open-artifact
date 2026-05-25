@@ -213,6 +213,31 @@ func TestListTagsReturnsFullMap(t *testing.T) {
 				t.Errorf("tag %q -> %q, want %q", tg.Name(), v.Name(), want[tg.Name()])
 			}
 		}
+
+		// TagTargets resolves them all in one call.
+		targets, err := p.TagTargets(ctx)
+		if err != nil {
+			t.Fatalf("TagTargets: %v", err)
+		}
+		if diff := cmp.Diff(want, targets); diff != "" {
+			t.Errorf("TagTargets (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestTagTargetsEmpty(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		s, _ := NewWithBucket(b, testScope)
+		targets, err := s.Package("requests").TagTargets(ctx)
+		if err != nil {
+			t.Fatalf("TagTargets (empty): %v", err)
+		}
+		if len(targets) != 0 {
+			t.Errorf("TagTargets len = %d, want 0", len(targets))
+		}
 	})
 }
 

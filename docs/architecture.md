@@ -252,10 +252,13 @@ user name that begins with `.` (`ErrInvalidName`), so user data can never be
 silently hidden or collide with `.meta`/`.tags`/`.cache` — the Store guarantees
 this rather than relying on each surface codec to reject names.
 
-`.meta` is a baseline envelope (`Digest`, `CreatedAt`, `UpdatedAt`) plus an
-opaque caller-owned `Annotations map[string]any` the Store round-trips but
-never interprets. `size` is intentionally absent — derive it from bucket
-attributes.
+`.meta` is a baseline envelope (`Digest`, `Size`, `CreatedAt`, `UpdatedAt`)
+plus an opaque caller-owned `Annotations map[string]any` the Store round-trips
+but never interprets. `Size` is the blob's byte length, counted on the write
+path (for free, alongside the rolling digest) and trusted the same way the
+digest is — so one `.meta` read yields digest, size, and annotations without a
+separate bucket-attributes call. When the sidecar is absent the Store
+recomputes both digest and size from the bucket's object attributes.
 
 ## Namespaces and modes
 

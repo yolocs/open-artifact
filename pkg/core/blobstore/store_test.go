@@ -155,6 +155,9 @@ func TestAddFileReadFileRoundTrip(t *testing.T) {
 		if want := sha256Hex(body); meta.Digest != want {
 			t.Errorf("digest = %q, want %q", meta.Digest, want)
 		}
+		if meta.Size != int64(len(body)) {
+			t.Errorf("size = %d, want %d", meta.Size, len(body))
+		}
 	})
 }
 
@@ -333,6 +336,9 @@ func TestMetaRecomputedWhenSidecarMissing(t *testing.T) {
 		}
 		if want := sha256Hex(body); meta.Digest != want {
 			t.Errorf("recomputed digest = %q, want %q", meta.Digest, want)
+		}
+		if meta.Size != int64(len(body)) {
+			t.Errorf("recomputed size = %d, want %d", meta.Size, len(body))
 		}
 	})
 }
