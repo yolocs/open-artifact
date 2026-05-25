@@ -282,6 +282,37 @@ func tarballPath(npmName, version string) string {
 	return "/" + npmName + "/-/" + tarballName(npmName, version)
 }
 
+func TestPackumentAssemblesManyVersionsConcurrently(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, memblob.OpenBucket(nil), npm.Config{})
+	versions := []string{"1.0.0", "1.1.0", "1.2.0", "2.0.0", "2.1.0", "3.0.0", "3.0.1", "3.1.0"}
+	for _, v := range versions {
+		resp := publish(t, h, "team-a", "left-pad", publishDoc("left-pad", v, []byte("body "+v), nil))
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("publish %s = %d: %s", v, resp.StatusCode, readResp(t, resp))
+		}
+		_ = readResp(t, resp)
+	}
+
+	pkmt := decodeJSON(t, do(t, h, http.MethodGet, "/team-a/left-pad"))
+	got, _ := pkmt["versions"].(map[string]any)
+	if len(got) != len(versions) {
+		t.Fatalf("packument has %d versions, want %d", len(got), len(versions))
+	}
+	for _, v := range versions {
+		entry, ok := got[v].(map[string]any)
+		if !ok {
+			t.Fatalf("packument missing version %s", v)
+		}
+		dist, _ := entry["dist"].(map[string]any)
+		want := h.server.URL + "/team-a" + tarballPath("left-pad", v)
+		if dist["tarball"] != want {
+			t.Fatalf("version %s tarball = %v, want %q", v, dist["tarball"], want)
+		}
+	}
+}
+
 func TestDuplicatePublishConflicts(t *testing.T) {
 	t.Parallel()
 

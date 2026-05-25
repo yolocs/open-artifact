@@ -12,6 +12,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -33,6 +34,11 @@ const metadataFile = "package.json"
 // DefaultMaxUploadBytes caps the publish request body. npm wraps the tarball as
 // base64 inside a JSON document, so the body is ~1.37x the tarball size.
 const DefaultMaxUploadBytes int64 = 100 << 20
+
+// versionReadConcurrency bounds the per-version metadata fan-out when assembling
+// a packument so a package with many versions does not open an unbounded number
+// of simultaneous backend reads.
+const versionReadConcurrency = 16
 
 type Config struct {
 	MaxUploadBytes int64
@@ -563,22 +569,52 @@ func (h *handler) packument(w http.ResponseWriter, r *http.Request, ns string, p
 		Versions: map[string]any{},
 		Time:     map[string]string{},
 	}
+
+	// Each version's metadata is an independent pair of reads (package.json plus
+	// the version envelope for its timestamp), so fan them out concurrently
+	// (bounded) and merge under a mutex. The resulting maps are key-ordered by
+	// JSON marshaling, so output stays deterministic regardless of completion
+	// order.
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		firstErr error
+	)
+	sem := make(chan struct{}, versionReadConcurrency)
 	for _, version := range versions {
-		meta, uploadedAt, err := readVersionMetadata(r.Context(), version)
-		if err != nil {
-			if errors.Is(err, core.ErrNotFound) {
+		version := version
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			meta, uploadedAt, err := readVersionMetadata(r.Context(), version)
+			if err != nil {
 				// A version directory without package.json is a partial write;
 				// skip it rather than failing the whole packument.
-				continue
+				if errors.Is(err, core.ErrNotFound) {
+					return
+				}
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
 			}
-			surface.WriteStoreError(w, r, err)
-			return
-		}
-		rewriteTarball(meta, base, ns, pn)
-		doc.Versions[version.Name()] = meta
-		if uploadedAt != "" {
-			doc.Time[version.Name()] = uploadedAt
-		}
+			rewriteTarball(meta, base, ns, pn)
+			mu.Lock()
+			doc.Versions[version.Name()] = meta
+			if uploadedAt != "" {
+				doc.Time[version.Name()] = uploadedAt
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		surface.WriteStoreError(w, r, firstErr)
+		return
 	}
 	if len(doc.Versions) == 0 {
 		surface.WriteStoreError(w, r, core.ErrNotFound)

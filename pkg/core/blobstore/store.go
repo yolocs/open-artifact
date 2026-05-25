@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gocloud.dev/blob"
@@ -404,6 +405,11 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	return out, nil
 }
 
+// readConcurrency bounds the fan-out of independent per-object reads (such as
+// resolving every dist-tag) so a package with many entries does not open an
+// unbounded number of simultaneous backend connections.
+const readConcurrency = 16
+
 func (p *pkg) TagTargets(ctx context.Context) (map[string]string, error) {
 	if p.nameErr != nil {
 		return nil, p.nameErr
@@ -416,14 +422,40 @@ func (p *pkg) TagTargets(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Each tag is a separate object, so resolve them concurrently (bounded) and
+	// merge under a mutex. Authorization happened once above; the per-tag reads
+	// go straight to the bucket, which is safe for concurrent use.
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		firstErr error
+	)
 	out := make(map[string]string, len(names))
+	sem := make(chan struct{}, readConcurrency)
 	for _, n := range names {
-		tag := decodeSegment(n)
-		target, err := s.readTagTarget(ctx, p.name, tag)
-		if err != nil {
-			return nil, err
-		}
-		out[tag] = target
+		n := n
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			tag := decodeSegment(n)
+			target, err := s.readTagTarget(ctx, p.name, tag)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			out[tag] = target
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }
