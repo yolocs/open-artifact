@@ -1,11 +1,11 @@
 package surface
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/yolocs/open-artifact/pkg/auth"
@@ -44,6 +44,23 @@ func WithMaxBody(w http.ResponseWriter, r *http.Request, maxBytes int64) *http.R
 	next := r.Clone(r.Context())
 	next.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	return next
+}
+
+// ReadCappedBody reads the request body fully, capped at maxBytes. It composes
+// WithMaxBody so callers do not reimplement the cap or the over-limit detection.
+// When the body exceeds the cap it returns tooLarge=true (the caller should
+// respond 413); any other read failure is returned as err.
+func ReadCappedBody(w http.ResponseWriter, r *http.Request, maxBytes int64) (body []byte, tooLarge bool, err error) {
+	r = WithMaxBody(w, r, maxBytes)
+	body, err = io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	return body, false, nil
 }
 
 func WriteStoreError(w http.ResponseWriter, r *http.Request, err error) {
@@ -147,28 +164,35 @@ func RedirectOrStreamFile(w http.ResponseWriter, r *http.Request, f core.File, c
 		return
 	}
 
-	rc, err := f.Read(r.Context())
+	// No signed URL (e.g. mem/file backends): stream the blob straight to the
+	// client with constant memory. The body is never buffered — integrity is
+	// established at write time, object stores checksum at rest, and clients
+	// verify downloads end-to-end — so there is no read-time re-hash to gate on.
+	// Content-Length and ETag come from the recorded Meta (size + digest), so a
+	// mid-stream backend failure after the header is sent simply truncates the
+	// response, which the client detects via its own hash check.
+	meta, err := f.Meta(r.Context())
 	if err != nil {
 		WriteStoreError(w, r, err)
 		return
 	}
-
-	// core.File readers can surface ErrDigestMismatch at EOF. Buffering keeps
-	// the helper able to return 422 before any response bytes are committed.
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, rc); err != nil {
-		_ = rc.Close()
-		WriteStoreError(w, r, err)
-		return
+	if meta.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
 	}
-	if err := rc.Close(); err != nil {
-		WriteStoreError(w, r, err)
-		return
+	if meta.Digest != "" {
+		w.Header().Set("ETag", strconv.Quote(meta.Digest))
 	}
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	rc, err := f.Read(r.Context())
+	if err != nil {
+		WriteStoreError(w, r, err)
+		return
+	}
+	defer rc.Close()
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(buf.Bytes())
+	_, _ = io.Copy(w, rc)
 }

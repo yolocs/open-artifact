@@ -29,8 +29,10 @@ type File interface {
 	// Implementations should answer with a single Stat on the blob path.
 	Exists(ctx context.Context) (bool, error)
 
-	// Read returns an open reader over the file's bytes. The caller is
-	// responsible for closing the reader.
+	// Read returns an open reader over the file's bytes, streamed straight from
+	// the backend without re-hashing — integrity is established at write time
+	// and clients verify downloads end-to-end, so the reader is not buffered or
+	// digest-checked on read. The caller is responsible for closing the reader.
 	Read(ctx context.Context) (io.ReadCloser, error)
 
 	// DownloadURL returns a pre-signed URL the caller can hand to a

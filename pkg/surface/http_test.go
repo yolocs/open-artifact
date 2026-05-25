@@ -201,7 +201,7 @@ func TestRedirectOrStreamFileStreamsWhenNoDownloadURL(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/files/pkg.whl", nil)
-	file := &fakeFile{name: "pkg.whl", body: []byte("wheel bytes")}
+	file := &fakeFile{name: "pkg.whl", body: []byte("wheel bytes"), digest: "sha256:abc123"}
 
 	RedirectOrStreamFile(rr, req, file, "application/octet-stream")
 
@@ -211,22 +211,11 @@ func TestRedirectOrStreamFileStreamsWhenNoDownloadURL(t *testing.T) {
 	if got := rr.Body.String(); got != "wheel bytes" {
 		t.Fatalf("body = %q, want wheel bytes", got)
 	}
-}
-
-func TestRedirectOrStreamFileMapsDigestMismatchBeforeWritingBody(t *testing.T) {
-	t.Parallel()
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/files/pkg.whl", nil)
-	file := &fakeFile{name: "pkg.whl", body: []byte("corrupt bytes"), readErr: core.ErrDigestMismatch}
-
-	RedirectOrStreamFile(rr, req, file, "application/octet-stream")
-
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusUnprocessableEntity)
+	if got := rr.Header().Get("Content-Length"); got != "11" {
+		t.Fatalf("Content-Length = %q, want 11", got)
 	}
-	if got := rr.Body.String(); got != `{"error":"digest mismatch"}`+"\n" {
-		t.Fatalf("body = %q", got)
+	if got := rr.Header().Get("ETag"); got != `"sha256:abc123"` {
+		t.Fatalf("ETag = %q, want %q", got, `"sha256:abc123"`)
 	}
 }
 
@@ -253,31 +242,18 @@ type fakeFile struct {
 	name        string
 	downloadURL string
 	body        []byte
-	readErr     error
+	digest      string
 }
 
-func (f *fakeFile) Name() string                                { return f.name }
-func (f *fakeFile) Namespace() string                           { return "pypi/global" }
-func (f *fakeFile) Version() core.Version                       { return nil }
-func (f *fakeFile) Package() core.Package                       { return nil }
-func (f *fakeFile) Meta(context.Context) (core.Meta, error)     { return core.Meta{}, nil }
+func (f *fakeFile) Name() string          { return f.name }
+func (f *fakeFile) Namespace() string     { return "pypi/global" }
+func (f *fakeFile) Version() core.Version { return nil }
+func (f *fakeFile) Package() core.Package { return nil }
+func (f *fakeFile) Meta(context.Context) (core.Meta, error) {
+	return core.Meta{Digest: f.digest, Size: int64(len(f.body))}, nil
+}
 func (f *fakeFile) Exists(context.Context) (bool, error)        { return true, nil }
 func (f *fakeFile) DownloadURL(context.Context) (string, error) { return f.downloadURL, nil }
 func (f *fakeFile) Read(context.Context) (io.ReadCloser, error) {
-	return &errReadCloser{src: bytes.NewReader(f.body), err: f.readErr}, nil
-}
-
-type errReadCloser struct {
-	src io.Reader
-	err error
-}
-
-func (r *errReadCloser) Close() error { return nil }
-
-func (r *errReadCloser) Read(p []byte) (int, error) {
-	n, err := r.src.Read(p)
-	if err == io.EOF && r.err != nil {
-		return n, r.err
-	}
-	return n, err
+	return io.NopCloser(bytes.NewReader(f.body)), nil
 }

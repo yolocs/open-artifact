@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
 
@@ -56,6 +57,7 @@ type runtimeConfig struct {
 	AuthnOIDCIssuers  []string
 	AuthnOIDCAudience string
 	PyPI              pypi.Config
+	NPM               npm.Config
 
 	// authnKindSet records whether --authn-kind was set explicitly (by flag or
 	// env) rather than left at its default, so it can be flagged as mutually
@@ -87,6 +89,7 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
 	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "in-process PyPI proxy upstream-index cache TTL (burst absorber); 0 uses the default, negative disables caching")
 	f.Duration("pypi-proxy-negative-cache-ttl", pypi.DefaultProxyNegativeCacheTTL, "how long an upstream PyPI 404 is remembered in proxy mode; 0 uses the default")
+	f.Int64("npm-max-upload-bytes", npm.DefaultMaxUploadBytes, "maximum npm publish body size in bytes; 0 uses the default cap")
 }
 
 // newViper builds a viper bound to cmd's flags with OPEN_ARTIFACT env
@@ -134,6 +137,7 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.PyPI.SimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
 		cfg.PyPI.ProxyIndexCacheTTL = v.GetDuration("pypi-proxy-index-cache-ttl")
 		cfg.PyPI.ProxyNegativeCacheTTL = v.GetDuration("pypi-proxy-negative-cache-ttl")
+		cfg.NPM.MaxUploadBytes = v.GetInt64("npm-max-upload-bytes")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -183,6 +187,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.PyPI.ProxyNegativeCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-proxy-negative-cache-ttl %s: must be >= 0", c.PyPI.ProxyNegativeCacheTTL))
+		}
+		if c.NPM.MaxUploadBytes < 0 {
+			errs = append(errs, fmt.Errorf("invalid --npm-max-upload-bytes %d: must be >= 0", c.NPM.MaxUploadBytes))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}

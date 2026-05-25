@@ -1,8 +1,12 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	_ "crypto/sha1" // register SHA-1 for ExpectedDigest verification
 	"crypto/sha256"
+	_ "crypto/sha512" // register SHA-512 for ExpectedDigest verification
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,6 +15,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gocloud.dev/blob"
@@ -404,6 +409,61 @@ func (p *pkg) Tags(ctx context.Context) ([]core.Tag, error) {
 	return out, nil
 }
 
+// readConcurrency bounds the fan-out of independent per-object reads (such as
+// resolving every dist-tag) so a package with many entries does not open an
+// unbounded number of simultaneous backend connections.
+const readConcurrency = 16
+
+func (p *pkg) TagTargets(ctx context.Context) (map[string]string, error) {
+	if p.nameErr != nil {
+		return nil, p.nameErr
+	}
+	s := p.store
+	if err := s.authorize(ctx, false); err != nil {
+		return nil, err
+	}
+	names, err := s.listChildNames(ctx, packageTagsPrefix(s.scope, p.name))
+	if err != nil {
+		return nil, err
+	}
+
+	// Each tag is a separate object, so resolve them concurrently (bounded) and
+	// merge under a mutex. Authorization happened once above; the per-tag reads
+	// go straight to the bucket, which is safe for concurrent use.
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		firstErr error
+	)
+	out := make(map[string]string, len(names))
+	sem := make(chan struct{}, readConcurrency)
+	for _, n := range names {
+		n := n
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			tag := decodeSegment(n)
+			target, err := s.readTagTarget(ctx, p.name, tag)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			out[tag] = target
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
 func (p *pkg) SetTag(ctx context.Context, name, target string) error {
 	if err := firstErr(p.nameErr, validateName(name), validateName(target)); err != nil {
 		return err
@@ -519,6 +579,21 @@ func (v *version) AddFile(ctx context.Context, name string, body io.Reader, opts
 	return f, nil
 }
 
+// expectedVerifier pairs a running hash with the caller-declared digest it must
+// equal once the body is fully streamed, plus the short algorithm name under
+// which the computed value is recorded in Meta.Digests.
+type expectedVerifier struct {
+	key  string
+	sum  hash.Hash
+	want []byte
+}
+
+// digestKey renders a crypto.Hash as the short, lowercase name used as a
+// Meta.Digests key: SHA-1 -> "sha1", SHA-512 -> "sha512", MD5 -> "md5".
+func digestKey(h crypto.Hash) string {
+	return strings.ToLower(strings.ReplaceAll(h.String(), "-", ""))
+}
+
 // writeFile streams body to blobKey while computing a rolling SHA256, then
 // writes the .meta sidecar at metaKey carrying the digest and timestamps. With
 // AllowOverwrite=false a pre-existing blob yields ErrAlreadyExists. It is the
@@ -549,11 +624,41 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	}
 
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(w, h), body); err != nil {
+	writers := []io.Writer{w, h}
+	verifiers := make([]expectedVerifier, 0, len(cfg.Expected))
+	for _, e := range cfg.Expected {
+		if !e.Hash.Available() {
+			cancelWrite()
+			_ = s.closeWriter(w)
+			return core.Meta{}, fmt.Errorf("blobstore: hash %v unavailable: %w", e.Hash, core.ErrUnsupported)
+		}
+		vh := e.Hash.New()
+		writers = append(writers, vh)
+		verifiers = append(verifiers, expectedVerifier{key: digestKey(e.Hash), sum: vh, want: e.Sum})
+	}
+
+	n, err := io.Copy(io.MultiWriter(writers...), body)
+	if err != nil {
 		// Abort the in-flight write so no partial blob is committed.
 		cancelWrite()
 		_ = s.closeWriter(w)
 		return core.Meta{}, fmt.Errorf("blobstore: stream %q: %w", blobKey, mapErr(err))
+	}
+	// Verify the caller-declared digests before committing; a mismatch aborts
+	// the write so a corrupt upload never leaves a servable blob. The computed
+	// values are recorded so the caller can serve them without re-reading.
+	var digests map[string]string
+	for _, v := range verifiers {
+		got := v.sum.Sum(nil)
+		if !bytes.Equal(got, v.want) {
+			cancelWrite()
+			_ = s.closeWriter(w)
+			return core.Meta{}, core.ErrDigestMismatch
+		}
+		if digests == nil {
+			digests = make(map[string]string, len(verifiers))
+		}
+		digests[v.key] = hex.EncodeToString(got)
 	}
 	if err := s.closeWriter(w); err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapErr(err))
@@ -562,6 +667,8 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	now := s.now().UTC()
 	meta := core.Meta{
 		Digest:      digestOf(h),
+		Digests:     digests,
+		Size:        n,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		Annotations: cfg.Annotations,
@@ -691,6 +798,7 @@ func (f *file) recomputeMeta(ctx context.Context) (core.Meta, error) {
 
 	return core.Meta{
 		Digest:    digestOf(h),
+		Size:      attrs.Size,
 		UpdatedAt: attrs.ModTime.UTC(),
 	}, nil
 }
@@ -706,30 +814,15 @@ func (f *file) Read(ctx context.Context) (io.ReadCloser, error) {
 	if err := s.authorize(ctx, false); err != nil {
 		return nil, err
 	}
+	// Stream straight from the bucket without re-hashing: the digest is verified
+	// at write time and recorded in the sidecar, object stores checksum at rest,
+	// and clients verify downloads end-to-end, so a read-time re-hash would only
+	// force callers to buffer the whole body to act on a trailing mismatch.
 	r, err := s.bNewReader(ctx, f.blobKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: open %q: %w", f.blobKey, mapErr(err))
 	}
-
-	want := f.sidecarDigest(ctx)
-	if want == "" {
-		return r, nil
-	}
-	return &verifyingReader{r: r, h: sha256.New(), want: want}, nil
-}
-
-// sidecarDigest returns the digest recorded in the file's sidecar, or "" when
-// the sidecar is absent or unreadable (digest verification is then skipped).
-func (f *file) sidecarDigest(ctx context.Context) string {
-	raw, err := f.store.bReadAll(ctx, f.metaKey)
-	if err != nil {
-		return ""
-	}
-	m, err := decodeMeta(raw)
-	if err != nil {
-		return ""
-	}
-	return m.Digest
+	return r, nil
 }
 
 // DownloadURL returns a pre-signed download URL through the facade-transparent
@@ -848,32 +941,6 @@ func (s *Store) writeMeta(ctx context.Context, path string, m core.Meta) error {
 	}
 	return nil
 }
-
-// verifyingReader streams the blob while hashing it, returning
-// ErrDigestMismatch in place of io.EOF when the computed digest disagrees with
-// the expected one.
-type verifyingReader struct {
-	r    io.ReadCloser
-	h    hash.Hash
-	want string
-	done bool
-}
-
-func (v *verifyingReader) Read(p []byte) (int, error) {
-	n, err := v.r.Read(p)
-	if n > 0 {
-		v.h.Write(p[:n])
-	}
-	if errors.Is(err, io.EOF) && !v.done {
-		v.done = true
-		if got := digestOf(v.h); got != v.want {
-			return n, core.ErrDigestMismatch
-		}
-	}
-	return n, err
-}
-
-func (v *verifyingReader) Close() error { return v.r.Close() }
 
 // digestOf renders a finished hash as "sha256:<hex>".
 func digestOf(h hash.Hash) string {

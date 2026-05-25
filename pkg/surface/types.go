@@ -7,10 +7,6 @@ import (
 	"github.com/yolocs/open-artifact/pkg/metrics"
 )
 
-type Handler interface {
-	Mux() http.Handler
-}
-
 type Middleware func(http.Handler) http.Handler
 
 type Options struct {

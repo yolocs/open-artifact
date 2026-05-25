@@ -48,6 +48,12 @@ type Package interface {
 	// Tags lists every Tag under this Package.
 	Tags(ctx context.Context) ([]Tag, error)
 
+	// TagTargets resolves every dist-tag on this Package to its target version
+	// in one call, returning a tag-name → version map. It exists so callers do
+	// not hand-roll a list-then-resolve-each loop; each tag is still a separate
+	// stored object, so the cost is one listing plus one read per tag.
+	TagTargets(ctx context.Context) (map[string]string, error)
+
 	// SetTag creates or updates a Tag, pointing name at the given target
 	// version. Tag mutation is the only writable operation rooted on
 	// Package (rather than Tag) because tags share a single backing
