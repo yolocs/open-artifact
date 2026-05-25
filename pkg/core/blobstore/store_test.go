@@ -175,10 +175,22 @@ func TestAddFileVerifiesExpectedDigests(t *testing.T) {
 		body := []byte("verify me")
 		sum := sha1.Sum(body)
 
-		// A matching declared digest commits normally.
-		if _, err := s.Package("p").Version("1.0.0").AddFile(ctx, "ok.bin", bytes.NewReader(body),
-			core.WithExpectedDigests(core.ExpectedDigest{Hash: crypto.SHA1, Sum: sum[:]})); err != nil {
+		// A matching declared digest commits normally and is recorded in
+		// Meta.Digests (the canonical SHA-256 stays in Meta.Digest).
+		f, err := s.Package("p").Version("1.0.0").AddFile(ctx, "ok.bin", bytes.NewReader(body),
+			core.WithExpectedDigests(core.ExpectedDigest{Hash: crypto.SHA1, Sum: sum[:]}))
+		if err != nil {
 			t.Fatalf("AddFile (matching digest): %v", err)
+		}
+		meta, err := f.Meta(ctx)
+		if err != nil {
+			t.Fatalf("Meta: %v", err)
+		}
+		if got, want := meta.Digests["sha1"], hex.EncodeToString(sum[:]); got != want {
+			t.Fatalf("Meta.Digests[sha1] = %q, want %q", got, want)
+		}
+		if _, ok := meta.Digests["sha256"]; ok {
+			t.Fatalf("Meta.Digests should exclude canonical sha256: %v", meta.Digests)
 		}
 
 		// A mismatch aborts with ErrDigestMismatch and commits nothing.
@@ -399,36 +411,6 @@ func TestMetaRecomputedWhenSidecarCorrupted(t *testing.T) {
 		}
 		if want := sha256Hex(body); meta.Digest != want {
 			t.Errorf("recomputed digest = %q, want %q", meta.Digest, want)
-		}
-	})
-}
-
-func TestReadTamperedBlobMismatch(t *testing.T) {
-	t.Parallel()
-
-	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
-		ctx := t.Context()
-		s, _ := NewWithBucket(b, testScope)
-		v := s.Package("p").Version("1.0.0")
-
-		f, err := v.AddFile(ctx, "f.txt", bytes.NewReader([]byte("original bytes")))
-		if err != nil {
-			t.Fatalf("AddFile: %v", err)
-		}
-
-		// Tamper the blob while leaving the sidecar digest intact.
-		if err := b.WriteAll(ctx, filePath(testScope, "p", "1.0.0", "f.txt"), []byte("tampered!"), nil); err != nil {
-			t.Fatalf("tamper blob: %v", err)
-		}
-
-		rc, err := f.Read(ctx)
-		if err != nil {
-			t.Fatalf("Read: %v", err)
-		}
-		_, readErr := io.ReadAll(rc)
-		rc.Close()
-		if !errors.Is(readErr, core.ErrDigestMismatch) {
-			t.Fatalf("expected ErrDigestMismatch, got %v", readErr)
 		}
 	})
 }

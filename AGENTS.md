@@ -59,6 +59,15 @@ belong there, not buried in a commit message or an issue comment.
 - **Security and correctness first.** Validate at system boundaries (untrusted
   client input, upstream responses); trust internal invariants. Never log
   credentials.
+- **Stream; don't buffer.** Artifacts can be large, so avoid holding whole
+  bodies in memory wherever the wire format allows. Prefer streaming straight
+  between the client and the blob backend (`io.Copy`, tee-into-store,
+  `base64.NewDecoder`) over `io.ReadAll` + a `[]byte`. Hash and verify *during*
+  the streamed write rather than in a separate buffered pass, and size
+  responses from recorded `Meta` (size/digest) instead of buffering to learn
+  the length. When a format genuinely forces buffering (e.g. npm embeds the
+  tarball base64 inside a JSON document), buffer only the unavoidable minimum
+  and say why.
 - **Comments explain why, not what.** Default to none; add one only when a
   constraint or hazard isn't obvious from the code.
 

@@ -219,23 +219,6 @@ func TestRedirectOrStreamFileStreamsWhenNoDownloadURL(t *testing.T) {
 	}
 }
 
-func TestRedirectOrStreamFileMapsDigestMismatchBeforeWritingBody(t *testing.T) {
-	t.Parallel()
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/files/pkg.whl", nil)
-	file := &fakeFile{name: "pkg.whl", body: []byte("corrupt bytes"), readErr: core.ErrDigestMismatch}
-
-	RedirectOrStreamFile(rr, req, file, "application/octet-stream")
-
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusUnprocessableEntity)
-	}
-	if got := rr.Body.String(); got != `{"error":"digest mismatch"}`+"\n" {
-		t.Fatalf("body = %q", got)
-	}
-}
-
 func TestOptionsApplyCommonSurfaceSettings(t *testing.T) {
 	t.Parallel()
 
@@ -259,7 +242,6 @@ type fakeFile struct {
 	name        string
 	downloadURL string
 	body        []byte
-	readErr     error
 	digest      string
 }
 
@@ -273,20 +255,5 @@ func (f *fakeFile) Meta(context.Context) (core.Meta, error) {
 func (f *fakeFile) Exists(context.Context) (bool, error)        { return true, nil }
 func (f *fakeFile) DownloadURL(context.Context) (string, error) { return f.downloadURL, nil }
 func (f *fakeFile) Read(context.Context) (io.ReadCloser, error) {
-	return &errReadCloser{src: bytes.NewReader(f.body), err: f.readErr}, nil
-}
-
-type errReadCloser struct {
-	src io.Reader
-	err error
-}
-
-func (r *errReadCloser) Close() error { return nil }
-
-func (r *errReadCloser) Read(p []byte) (int, error) {
-	n, err := r.src.Read(p)
-	if err == io.EOF && r.err != nil {
-		return n, r.err
-	}
-	return n, err
+	return io.NopCloser(bytes.NewReader(f.body)), nil
 }

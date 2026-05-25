@@ -257,13 +257,28 @@ user name that begins with `.` (`ErrInvalidName`), so user data can never be
 silently hidden or collide with `.meta`/`.tags`/`.cache` — the Store guarantees
 this rather than relying on each surface codec to reject names.
 
-`.meta` is a baseline envelope (`Digest`, `Size`, `CreatedAt`, `UpdatedAt`)
-plus an opaque caller-owned `Annotations map[string]any` the Store round-trips
-but never interprets. `Size` is the blob's byte length, counted on the write
-path (for free, alongside the rolling digest) and trusted the same way the
-digest is — so one `.meta` read yields digest, size, and annotations without a
-separate bucket-attributes call. When the sidecar is absent the Store
-recomputes both digest and size from the bucket's object attributes.
+`.meta` is a baseline envelope (`Digest`, `Digests`, `Size`, `CreatedAt`,
+`UpdatedAt`) plus an opaque caller-owned `Annotations map[string]any` the Store
+round-trips but never interprets. `Size` is the blob's byte length, counted on
+the write path (for free, alongside the rolling digest) and trusted the same
+way the digest is — so one `.meta` read yields digest, size, and annotations
+without a separate bucket-attributes call. When the sidecar is absent the Store
+recomputes both digest and size from the bucket's object attributes. `Digest`
+is the canonical SHA-256 and the file's content identity; `Digests` holds any
+*additional* hashes a caller asked the Store to compute and verify on write via
+`WithExpectedDigests` (keyed by short algorithm name — `sha1`, `sha512`, `md5`
+— in lowercase hex), so a format can serve an npm `integrity`/`shasum` or a
+Maven checksum sidecar without re-reading the blob.
+
+**Downloads stream; integrity is a write-time guarantee.** `File.Read` returns
+the backend reader unwrapped — it does **not** re-hash on read. Integrity is
+established when the blob is written (the rolling SHA-256, plus any
+`WithExpectedDigests` checks, verified before commit), object stores checksum
+their own bytes at rest, and clients verify downloads end to end (pip against
+the simple-index hash, npm against `dist.integrity`). Re-hashing on read would
+force the surface to buffer the whole body just to act on a trailing mismatch,
+so we don't: the shared download helper streams straight from the bucket to the
+client with constant memory, sizing the response from the recorded `Meta`.
 
 ## Namespaces and modes
 

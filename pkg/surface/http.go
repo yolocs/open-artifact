@@ -1,7 +1,6 @@
 package surface
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -165,37 +164,35 @@ func RedirectOrStreamFile(w http.ResponseWriter, r *http.Request, f core.File, c
 		return
 	}
 
-	rc, err := f.Read(r.Context())
+	// No signed URL (e.g. mem/file backends): stream the blob straight to the
+	// client with constant memory. The body is never buffered — integrity is
+	// established at write time, object stores checksum at rest, and clients
+	// verify downloads end-to-end — so there is no read-time re-hash to gate on.
+	// Content-Length and ETag come from the recorded Meta (size + digest), so a
+	// mid-stream backend failure after the header is sent simply truncates the
+	// response, which the client detects via its own hash check.
+	meta, err := f.Meta(r.Context())
 	if err != nil {
 		WriteStoreError(w, r, err)
 		return
 	}
-
-	// core.File readers can surface ErrDigestMismatch at EOF. Buffering keeps
-	// the helper able to return 422 before any response bytes are committed.
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, rc); err != nil {
-		_ = rc.Close()
-		WriteStoreError(w, r, err)
-		return
+	if meta.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
 	}
-	if err := rc.Close(); err != nil {
-		WriteStoreError(w, r, err)
-		return
-	}
-
-	// The body is fully buffered, so advertise its exact length rather than
-	// chunking, and an ETag from the recorded content digest so clients can
-	// cache and make conditional requests. A digest read failure is
-	// non-fatal — serve the bytes without the validator.
-	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
-	if meta, err := f.Meta(r.Context()); err == nil && meta.Digest != "" {
+	if meta.Digest != "" {
 		w.Header().Set("ETag", strconv.Quote(meta.Digest))
 	}
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+
+	rc, err := f.Read(r.Context())
+	if err != nil {
+		WriteStoreError(w, r, err)
+		return
+	}
+	defer rc.Close()
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(buf.Bytes())
+	_, _ = io.Copy(w, rc)
 }
