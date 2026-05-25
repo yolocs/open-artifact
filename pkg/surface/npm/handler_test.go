@@ -107,9 +107,13 @@ func sha512SRI(b []byte) string {
 	return "sha512-" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
-// publishDoc builds a CouchDB-shaped npm publish document for a single version.
+// publishDoc builds a CouchDB-shaped npm publish document for a single version,
+// matching the real npm client: dist.tarball's basename is the unscoped
+// "<unscoped>-<version>.tgz", while the _attachments key is the full-name
+// "<name>-<version>.tgz" (which differs for scoped packages).
 func publishDoc(npmName, version string, tarball []byte, distTags map[string]string) map[string]any {
 	filename := tarballName(npmName, version)
+	attachKey := npmName + "-" + version + ".tgz"
 	meta := map[string]any{
 		"name":    npmName,
 		"version": version,
@@ -125,7 +129,7 @@ func publishDoc(npmName, version string, tarball []byte, distTags map[string]str
 		"name":     npmName,
 		"versions": map[string]any{version: meta},
 		"_attachments": map[string]any{
-			filename: map[string]any{
+			attachKey: map[string]any{
 				"content_type": "application/octet-stream",
 				"data":         base64.StdEncoding.EncodeToString(tarball),
 				"length":       len(tarball),

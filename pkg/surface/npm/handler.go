@@ -430,12 +430,12 @@ func (h *handler) publish(w http.ResponseWriter, r *http.Request, ns string, pn 
 		return
 	}
 	dist, _ := meta["dist"].(map[string]any)
-	tarballName, err := resolveTarballName(pn, version, dist, doc.Attachments)
+	tarballName, err := tarballStorageName(pn, version, dist)
 	if err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
 	}
-	att, ok := doc.Attachments[tarballName]
+	att, ok := pickAttachment(doc.Attachments, tarballName, pn, version)
 	if !ok {
 		surface.WriteError(w, http.StatusBadRequest, "missing tarball attachment")
 		return
@@ -720,9 +720,12 @@ func deriveVersion(pn PackageName, filename string) string {
 	return strings.TrimPrefix(trimmed, prefix)
 }
 
-// resolveTarballName determines the attachment filename to store under: the
-// basename of dist.tarball when present, otherwise the sole attachment key.
-func resolveTarballName(pn PackageName, version string, dist map[string]any, attachments map[string]attachment) (string, error) {
+// tarballStorageName is the filename the tarball is stored and served under.
+// npm names it after the unscoped package ("<unscoped>-<version>.tgz"), which
+// is also the basename of dist.tarball, so the download route can derive the
+// version from it. It prefers the dist.tarball basename and falls back to the
+// convention when dist is absent.
+func tarballStorageName(pn PackageName, version string, dist map[string]any) (string, error) {
 	if dist != nil {
 		if t, _ := dist["tarball"].(string); t != "" {
 			name := path.Base(t)
@@ -732,15 +735,26 @@ func resolveTarballName(pn PackageName, version string, dist map[string]any, att
 			return name, nil
 		}
 	}
+	return pn.Unscoped() + "-" + version + ".tgz", nil
+}
+
+// pickAttachment finds the published tarball bytes. A single-version publish
+// carries exactly one attachment, so that is preferred; otherwise it is looked
+// up by the storage name or by npm's full-name key ("<name>-<version>.tgz",
+// which for a scoped package differs from the unscoped storage name).
+func pickAttachment(attachments map[string]attachment, storageName string, pn PackageName, version string) (attachment, bool) {
 	if len(attachments) == 1 {
-		for name := range attachments {
-			if err := ValidateTarballName(name); err != nil {
-				return "", err
-			}
-			return name, nil
+		for _, a := range attachments {
+			return a, true
 		}
 	}
-	return "", core.ErrNotFound
+	if a, ok := attachments[storageName]; ok {
+		return a, true
+	}
+	if a, ok := attachments[pn.Original+"-"+version+".tgz"]; ok {
+		return a, true
+	}
+	return attachment{}, false
 }
 
 // requestBaseURL builds the scheme://host prefix for absolute tarball URLs,

@@ -30,3 +30,21 @@ jobs:
         run: go test -race -tags=integration -run '^TestPyPIHostedDownload$' ./pkg/surface/pypi
       - name: PyPI proxy - download (pip, real pypi.org)
         run: go test -race -tags=integration -run '^TestPyPIProxyDownload$' ./pkg/surface/pypi
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: npm hosted - publish + install
+        run: go test -race -tags=integration -run '^TestNPMHostedPublishAndInstall$' ./pkg/surface/npm
+      - name: npm hosted - scoped publish + install
+        run: go test -race -tags=integration -run '^TestNPMScopedPublishAndInstall$' ./pkg/surface/npm
+      - name: npm hosted - dist-tags (add, ls)
+        run: go test -race -tags=integration -run '^TestNPMDistTags$' ./pkg/surface/npm
+
