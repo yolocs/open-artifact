@@ -79,7 +79,7 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request) {
 func (h *handler) serveLocal(w http.ResponseWriter, r *http.Request, store core.Store, p requestPath) {
 	switch p.Kind {
 	case pathPool:
-		f := store.Package(p.PoolDir).File(p.File)
+		f := store.Package(p.PkgName).Version(p.Version).File(p.File)
 		if exists, err := f.Exists(r.Context()); err != nil {
 			surface.WriteStoreError(w, r, err)
 			return

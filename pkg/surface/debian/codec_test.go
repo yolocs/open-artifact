@@ -16,7 +16,6 @@ func TestParsePath(t *testing.T) {
 		path        string
 		wantKind    pathKind
 		wantRestRaw string
-		wantPoolDir string
 		wantFile    string
 		wantPkg     string
 		wantVersion string
@@ -38,7 +37,6 @@ func TestParsePath(t *testing.T) {
 			path:        "/team/debian/pool/main/h/hello/hello_2.10-2_amd64.deb",
 			wantKind:    pathPool,
 			wantRestRaw: "pool/main/h/hello/hello_2.10-2_amd64.deb",
-			wantPoolDir: "main/h/hello",
 			wantFile:    "hello_2.10-2_amd64.deb",
 			wantPkg:     "hello",
 			wantVersion: "2.10-2",
@@ -48,7 +46,6 @@ func TestParsePath(t *testing.T) {
 			path:        "/team/debian/pool/main/h/hello/hello_2.10-2_all.udeb",
 			wantKind:    pathPool,
 			wantRestRaw: "pool/main/h/hello/hello_2.10-2_all.udeb",
-			wantPoolDir: "main/h/hello",
 			wantFile:    "hello_2.10-2_all.udeb",
 			wantPkg:     "hello",
 			wantVersion: "2.10-2",
@@ -58,7 +55,6 @@ func TestParsePath(t *testing.T) {
 			path:        "/team/debian/pool/main/h/hello/hello_2.10-2.dsc",
 			wantKind:    pathPool,
 			wantRestRaw: "pool/main/h/hello/hello_2.10-2.dsc",
-			wantPoolDir: "main/h/hello",
 			wantFile:    "hello_2.10-2.dsc",
 			wantPkg:     "hello",
 			wantVersion: "2.10-2",
@@ -68,7 +64,6 @@ func TestParsePath(t *testing.T) {
 			path:        "/team/debian/pool/main/h/hello/hello_2.10.orig.tar.gz",
 			wantKind:    pathPool,
 			wantRestRaw: "pool/main/h/hello/hello_2.10.orig.tar.gz",
-			wantPoolDir: "main/h/hello",
 			wantFile:    "hello_2.10.orig.tar.gz",
 			wantPkg:     "hello",
 			wantVersion: "2.10",
@@ -88,9 +83,6 @@ func TestParsePath(t *testing.T) {
 			}
 			if got.RestRaw != tc.wantRestRaw {
 				t.Errorf("RestRaw = %q, want %q", got.RestRaw, tc.wantRestRaw)
-			}
-			if got.PoolDir != tc.wantPoolDir {
-				t.Errorf("PoolDir = %q, want %q", got.PoolDir, tc.wantPoolDir)
 			}
 			if got.File != tc.wantFile {
 				t.Errorf("File = %q, want %q", got.File, tc.wantFile)

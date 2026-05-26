@@ -1,6 +1,7 @@
 package debian
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -138,7 +139,7 @@ func (e *proxyEngine) headIndex(w http.ResponseWriter, r *http.Request, ns strin
 // serveArtifact serves a pool artifact: local cache hit, negative-cache check,
 // filter evaluation, then an upstream stream-with-tee into the Store.
 func (e *proxyEngine) serveArtifact(w http.ResponseWriter, r *http.Request, ns string, spec namespace.Spec, store core.Store, p requestPath) {
-	local := store.Package(p.PoolDir).File(p.File)
+	local := store.Package(p.PkgName).Version(p.Version).File(p.File)
 	if exists, err := local.Exists(r.Context()); err != nil {
 		surface.WriteStoreError(w, r, err)
 		return
@@ -215,24 +216,37 @@ func (e *proxyEngine) streamAndCache(w http.ResponseWriter, r *http.Request, sto
 	ann := artifactAnnotations(p, e.now().UTC(), upstream)
 
 	copyErr, fillErr := surface.TeeStreamToStore(w, sr.Body, poolContentType(p.File), sr.ContentLength, func(src io.Reader) error {
-		_, err := store.Package(p.PoolDir).AddFile(ctx, p.File, src, core.WithAnnotations(ann))
+		_, err := store.Package(p.PkgName).Version(p.Version).AddFile(ctx, p.File, src, core.WithAnnotations(ann))
 		return err
 	})
 	switch {
 	case copyErr != nil:
 		logging.FromContext(ctx).Warn("proxy artifact stream interrupted",
-			logging.KeyComponent, "debian", "pool_dir", p.PoolDir, "file", p.File, logging.KeyError, copyErr)
+			logging.KeyComponent, "debian", "package", p.PkgName, "version", p.Version, "file", p.File, logging.KeyError, copyErr)
 	case fillErr != nil:
 		logging.FromContext(ctx).Warn("proxy cache fill failed",
-			logging.KeyComponent, "debian", "pool_dir", p.PoolDir, "file", p.File, logging.KeyError, fillErr)
+			logging.KeyComponent, "debian", "package", p.PkgName, "version", p.Version, "file", p.File, logging.KeyError, fillErr)
 	default:
-		if _, err := store.AddPackage(ctx, p.PoolDir, core.WithAnnotations(map[string]any{
-			"debian:pool_dir": p.PoolDir,
-			"debian:package":  p.PkgName,
-		})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
-			logging.FromContext(ctx).Warn("proxy cache fill add package failed",
-				logging.KeyComponent, "debian", logging.KeyError, err)
-		}
+		e.recordParents(ctx, store, p)
+	}
+}
+
+// recordParents writes the package and version envelopes after a successful
+// fill so the cache survives a process restart. Best-effort: a failure is
+// logged and the next request refills.
+func (e *proxyEngine) recordParents(ctx context.Context, store core.Store, p requestPath) {
+	if _, err := store.AddPackage(ctx, p.PkgName, core.WithAnnotations(map[string]any{
+		"debian:package": p.PkgName,
+	})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
+		logging.FromContext(ctx).Warn("proxy cache fill add package failed",
+			logging.KeyComponent, "debian", logging.KeyError, err)
+		return
+	}
+	if _, err := store.Package(p.PkgName).AddVersion(ctx, p.Version, core.WithAnnotations(map[string]any{
+		"debian:version": p.Version,
+	})); err != nil && !errors.Is(err, core.ErrAlreadyExists) {
+		logging.FromContext(ctx).Warn("proxy cache fill add version failed",
+			logging.KeyComponent, "debian", logging.KeyError, err)
 	}
 }
 
@@ -306,9 +320,9 @@ func serveCachedIndex(w http.ResponseWriter, r *http.Request, store core.Store, 
 func artifactAnnotations(p requestPath, fetchedAt time.Time, upstream string) map[string]any {
 	out := map[string]any{
 		"debian:file":        p.File,
-		"debian:pool_dir":    p.PoolDir,
 		"debian:package":     p.PkgName,
 		"debian:version":     p.Version,
+		"debian:pool_path":   p.RestRaw,
 		"debian:uploaded_at": fetchedAt.Format(time.RFC3339Nano),
 	}
 	if upstream != "" {

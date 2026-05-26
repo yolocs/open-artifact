@@ -6,14 +6,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,7 +51,7 @@ func TestDebianProxyAptGetDownload(t *testing.T) {
 	h := newProxyHarness(t, memblob.OpenBucket(nil), debian.Config{}, proxyNS("team-proxy", up.server.URL))
 
 	root := t.TempDir()
-	aptEnv := newAptEnv(t, root, h.server.URL+"/team-proxy/debian", arch)
+	aptEnv := newAptEnv(t, root, h.server.URL+"/team-proxy/debian", arch, true, "stable")
 
 	// apt-get update: pulls Release + Packages through the proxy.
 	aptEnv.run(t, aptGet, "update")
@@ -95,27 +93,6 @@ func TestDebianProxyAptGetDownload(t *testing.T) {
 	if body := []byte(readResp(t, resp)); !bytes.Equal(body, repo.deb) {
 		t.Fatalf("cached .deb body (%d bytes) does not match upstream", len(body))
 	}
-}
-
-func requireApt(t *testing.T) string {
-	t.Helper()
-	aptGet, err := exec.LookPath("apt-get")
-	if err != nil {
-		t.Skipf("apt-get is not available: %v", err)
-	}
-	if _, err := exec.LookPath("dpkg"); err != nil {
-		t.Skipf("dpkg is not available: %v", err)
-	}
-	return aptGet
-}
-
-func dpkgArch(t *testing.T) string {
-	t.Helper()
-	out, err := exec.CommandContext(t.Context(), "dpkg", "--print-architecture").Output()
-	if err != nil {
-		t.Skipf("dpkg --print-architecture failed: %v", err)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 // aptRepo is a minimal, self-consistent APT repository: a single .deb in pool/
@@ -251,69 +228,4 @@ func md5Hex(b []byte) string {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
-}
-
-// aptEnv runs apt-get with every directory redirected into a temp root so it
-// works without root privileges.
-type aptEnv struct {
-	opts []string
-}
-
-func newAptEnv(t *testing.T, root, repoURL, arch string) *aptEnv {
-	t.Helper()
-	listsDir := filepath.Join(root, "lists")
-	archivesDir := filepath.Join(root, "archives")
-	etcDir := filepath.Join(root, "etc")
-	for _, d := range []string{
-		filepath.Join(listsDir, "partial"),
-		filepath.Join(archivesDir, "partial"),
-		etcDir,
-	} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
-
-	sourcesFile := filepath.Join(etcDir, "sources.list")
-	if err := os.WriteFile(sourcesFile,
-		[]byte(fmt.Sprintf("deb [trusted=yes arch=%s] %s stable main\n", arch, repoURL)), 0o644); err != nil {
-		t.Fatalf("write sources.list: %v", err)
-	}
-	statusFile := filepath.Join(etcDir, "status")
-	if err := os.WriteFile(statusFile, nil, 0o644); err != nil {
-		t.Fatalf("write status: %v", err)
-	}
-
-	return &aptEnv{opts: []string{
-		"-o", "Dir::Etc::sourcelist=" + sourcesFile,
-		"-o", "Dir::Etc::sourceparts=-",
-		"-o", "Dir::State::Lists=" + listsDir,
-		"-o", "Dir::State::status=" + statusFile,
-		"-o", "Dir::Cache=" + filepath.Join(root, "cache"),
-		"-o", "Dir::Cache::Archives=" + archivesDir,
-		"-o", "Acquire::Languages=none",
-		"-o", "APT::Architecture=" + arch,
-		"-o", "APT::Get::List-Cleanup=0",
-		"-o", "Acquire::AllowInsecureRepositories=true",
-	}}
-}
-
-func (e *aptEnv) run(t *testing.T, aptGet string, args ...string) {
-	t.Helper()
-	e.runIn(t, "", aptGet, args...)
-}
-
-func (e *aptEnv) runIn(t *testing.T, dir, aptGet string, args ...string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-	full := append(append([]string{}, e.opts...), args...)
-	cmd := exec.CommandContext(ctx, aptGet, full...)
-	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("apt-get %v failed: %v\n%s", args, err, out.String())
-	}
 }

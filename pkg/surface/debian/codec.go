@@ -43,11 +43,13 @@ type requestPath struct {
 	// as the logical cache/negative-cache key.
 	RestRaw string
 
-	// Pool fields (Kind == pathPool only).
-	PoolDir string // decoded directory under pool/, e.g. "main/h/hello"
+	// Pool fields (Kind == pathPool only). File/PkgName/Version map to the core
+	// Package→Version→File nouns exactly like the other formats: a pool artifact
+	// is stored at Package(PkgName).Version(Version).File(File). PkgName and
+	// Version are parsed from the filename (Debian versions never contain '_').
 	File    string // decoded filename, e.g. "hello_2.10-2_amd64.deb"
-	PkgName string // best-effort package name parsed from File (filter Ref)
-	Version string // best-effort version parsed from File (filter Ref)
+	PkgName string // package name parsed from File
+	Version string // version parsed from File
 }
 
 // parsePath parses an escaped request path of the form
@@ -97,18 +99,16 @@ func parsePath(escapedPath string) (requestPath, error) {
 			return requestPath{}, fmt.Errorf("%w: Debian pool path too short", core.ErrInvalidName)
 		}
 		file := decoded[len(decoded)-1]
-		poolDir := strings.Join(decoded[1:len(decoded)-1], "/")
 		pkg, version := parsePoolFile(file)
-		if poolDir == "" {
-			// A file directly under pool/ is unusual; fall back to the parsed
-			// package name so the Store location stays deterministic.
-			poolDir = pkg
+		if version == "" {
+			// A pool filename without a version is malformed; key it by the full
+			// filename so the Store location stays deterministic and non-empty.
+			version = file
 		}
 		return requestPath{
 			Namespace: ns,
 			Kind:      pathPool,
 			RestRaw:   restRaw,
-			PoolDir:   poolDir,
 			File:      file,
 			PkgName:   pkg,
 			Version:   version,
@@ -211,6 +211,8 @@ func poolContentType(file string) string {
 	return "application/octet-stream"
 }
 
-func indexNegKey(p requestPath) string   { return "debian:index:" + p.RestRaw }
-func poolNegKey(p requestPath) string    { return "debian:pool:" + p.PoolDir + "/" + p.File }
+func indexNegKey(p requestPath) string { return "debian:index:" + p.RestRaw }
+func poolNegKey(p requestPath) string {
+	return "debian:pool:" + p.PkgName + ":" + p.Version + ":" + p.File
+}
 func indexCacheKey(p requestPath) string { return "debian:index:" + p.RestRaw }

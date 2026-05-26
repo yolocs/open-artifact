@@ -831,19 +831,23 @@ else (`404`):
   recording the package envelope on a clean fill so the cache survives a
   restart. `.deb`/`.udeb` are served as `application/vnd.debian.binary-package`.
 
-**Pool → core mapping.** The pool-relative directory is the core package name
-(e.g. `pool/main/h/hello/hello_2.10-2_amd64.deb` → package `main/h/hello`, file
-`hello_2.10-2_amd64.deb`); `blobstore` escapes the embedded `/` into one bucket
-segment. Because the directory plus filename reconstruct the upstream pool path
-1:1, the Store location is deterministic and collision-free without parsing the
-filename. The package name and version are *separately* parsed from the filename
-(`<name>_<version>_<arch>.deb`; Debian versions never contain `_`) **only** for
-the filter `Ref` — an imperfect parse can affect allow/deny/delay matching but
-never the cache location. Debian exposes no reliable per-file publish time, so a
-`delay` filter that needs one **fails closed** (denied), as the Maven proxy does
-when metadata is missing; `allow`/`deny` filters work fully. The upstream URL is
-built by joining the namespace's upstream base with the *still-escaped* request
-path so the bytes APT verifies are forwarded unchanged.
+**Pool → core mapping.** A pool artifact maps to the `Package → Version → File`
+nouns exactly like every other format — no Debian-specific layout. The package
+name and version are parsed from the filename
+(`<name>_<version>_<arch>.deb`; Debian versions never contain `_`, so splitting
+on `_` is unambiguous), and the filename is the core file:
+`pool/main/h/hello/hello_2.10-2_amd64.deb` → `Package("hello").Version("2.10-2").File("hello_2.10-2_amd64.deb")`.
+This is collision-free for the same reason PyPI's `(project, version, filename)`
+mapping is: a Debian `.deb`/source filename is unique within a repository, so two
+distinct upstream pool paths never map to the same triple. The pool *directory*
+is not stored — it is redundant for serving (the request always carries the full
+path, and the upstream URL is built by joining the namespace's upstream base with
+the *still-escaped* request path so the bytes APT verifies are forwarded
+unchanged) — but is recorded in the file annotations (`debian:pool_path`) for
+traceability. The same parsed package/version feed the filter `Ref`. Debian
+exposes no reliable per-file publish time, so a `delay` filter that needs one
+**fails closed** (denied), as the Maven proxy does when metadata is missing;
+`allow`/`deny` filters work fully.
 
 ## Non-goals / deferred (v1)
 

@@ -83,4 +83,6 @@ jobs:
         run: apt-get --version && dpkg --print-architecture
       - name: Debian proxy - apt-get update + download (in-process upstream)
         run: go test -race -tags=integration -run '^TestDebianProxyAptGetDownload$' ./pkg/surface/debian
+      - name: Debian proxy - apt-get update + download (real archive.ubuntu.com)
+        run: go test -race -tags=debianupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/debian
 
