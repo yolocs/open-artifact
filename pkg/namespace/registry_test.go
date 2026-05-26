@@ -93,8 +93,8 @@ func TestRegistryStoreScoping(t *testing.T) {
 			t.Fatalf("AddFile: %v", err)
 		}
 
-		// Bytes land under <root>/<prefix>/<ns>/<fmt>/<package>/<version>/<file>.
-		want := blobstore.Root + "shared/team-a/pypi/requests/2.31.0/requests-2.31.0.whl"
+		// Bytes land under <root>/<prefix>/<ns>/<fmt>/<package>/<version>/.files/<file>.
+		want := blobstore.Root + "shared/team-a/pypi/requests/2.31.0/.files/requests-2.31.0.whl"
 		if ok, _ := b.Exists(ctx, want); !ok {
 			t.Errorf("expected blob at %q", want)
 		}

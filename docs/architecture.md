@@ -10,9 +10,9 @@ for how to run and configure the binary see
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
 logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
-proxy serving, the npm hosted and proxy surfaces, and the shared proxy
-primitives exist today; the Maven surfaces are described here as the design
-they are being built toward. Where it matters, sections note what is
+proxy serving, the npm hosted and proxy surfaces, Maven hosted serving, and
+the shared proxy primitives exist today; Maven proxy mode is described here as
+the design being built toward. Where it matters, sections note what is
 implemented versus planned.
 
 ## What this project is
@@ -127,8 +127,8 @@ pkg/
     filter/          ← allow/deny/delay config schema, validation, and decision engine
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     pypi/            ← PEP 503/691 hosted + pull-through proxy
-    npm/             ← npm registry hosted; pull-through proxy (planned)
-    maven/           ← Maven 2 layout hosted + proxy (planned)
+    npm/             ← npm registry hosted + pull-through proxy
+    maven/           ← Maven 2 layout hosted (proxy planned)
 docs/
 ```
 
@@ -193,14 +193,18 @@ format below that:
 
 ```
 open-artifact/v1/<ns>/.meta                                  ← namespace metadata (mode, policy, proxy spec)
+open-artifact/v1/<ns>/<fmt>/.files/<file>                    ← format-level file
+open-artifact/v1/<ns>/<fmt>/.files/.meta.<file>              ← format-level file metadata
 open-artifact/v1/<ns>/.cache/...                             ← namespace-level cache (opaque to Store)
 open-artifact/v1/<ns>/<fmt>/.cache/...                       ← format-level cache, e.g. proxy pull-through
 open-artifact/v1/<ns>/<fmt>/<package>/.meta                  ← package API object (optional)
+open-artifact/v1/<ns>/<fmt>/<package>/.files/<file>          ← package-level file
+open-artifact/v1/<ns>/<fmt>/<package>/.files/.meta.<file>    ← package-level file metadata
 open-artifact/v1/<ns>/<fmt>/<package>/.tags/<tag>            ← one object per dist-tag; body = target version
 open-artifact/v1/<ns>/<fmt>/<package>/.cache/...             ← package-scoped cache (opaque to Store)
 open-artifact/v1/<ns>/<fmt>/<package>/<version>/.meta        ← version API object (optional)
-open-artifact/v1/<ns>/<fmt>/<package>/<version>/.meta.<file> ← per-file API object (always present; holds digest)
-open-artifact/v1/<ns>/<fmt>/<package>/<version>/<file>       ← the file blob
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/.files/<file> ← version-level file
+open-artifact/v1/<ns>/<fmt>/<package>/<version>/.files/.meta.<file> ← version-level file metadata
 ```
 
 The data-plane factory binds a `blobstore.Store` to scope `<ns>/<fmt>`; the
@@ -689,8 +693,8 @@ the cache.
   `blobstore.Store` must not close a caller-owned bucket.
 - Streaming upload: `bucket.NewWriter` + rolling SHA256 on the write path
   (plus any `WithExpectedDigests` hashes, compared before commit so a declared
-  mismatch aborts the write); write the `.meta.<file>` sidecar after the writer
-  closes successfully. The writer is created under a cancelable child context;
+  mismatch aborts the write); write the `.files/.meta.<file>` sidecar after the
+  writer closes successfully. The writer is created under a cancelable child context;
   on a mid-stream read error the write is **cancelled** before `Close` (for memblob/fileblob a plain
   `Close` would commit the bytes written so far as a complete object), so a body
   that ends early — a disconnected upload, an interrupted proxy stream — never
@@ -712,8 +716,9 @@ commit, and `GOOS/GOARCH`. Every flag has a matching env var (prefix
 `OPEN_ARTIFACT_PORT` taking precedence); no config files. The root command uses
 `SilenceUsage`/`SilenceErrors` so errors are testable; each command validates
 config at startup and fails with clear, joined errors. Data-plane-only flags
-(`--repo-type`, `--disable-authn`, `--authn-*`) live on `serve` and are stubbed
-here for later issues. The command layer (`pkg/command`) is the only place that
+(`--repo-type`, `--disable-authn`, `--authn-*`, per-format upload caps) live on
+`serve`; PyPI and Maven hosted handlers consume their format-specific
+configuration today. The command layer (`pkg/command`) is the only place that
 opens a bucket and registers blob drivers (`pkg/bucket`). The logger
 (`pkg/logging`) is built once at command start, placed on the context, and
 flows down from there; the shared HTTP server lifecycle (`pkg/serving`) reads it
@@ -753,6 +758,33 @@ shapes, and test layout.
    real package-manager clients against the harness.
 6. Operator notes in `docs/`; flags/env for upstream URL, upload caps, and
    cache TTLs.
+
+## Maven hosted surface
+
+The Maven surface (`pkg/surface/maven`, mounted for `--repo-type=maven`) serves
+hosted Maven 2 repository paths below `/{namespace}/maven2`. It accepts `PUT`
+and `POST` uploads and serves `GET`/`HEAD` downloads for artifact files,
+checksum companions (`.md5`, `.sha1`, `.sha256`, `.sha512`), artifact-level
+`maven-metadata.xml`, version-level snapshot `maven-metadata.xml`, and
+`archetype-catalog.xml`.
+
+The format codec decodes each URL segment with `url.PathUnescape` and rejects
+malformed escapes, empty segments, `.`, `..`, leading-dot segments, absolute or
+embedded path separators, and characters outside `[A-Za-z0-9._-]+`. Maven
+coordinates map to core names without teaching `core` about Maven:
+`com.example:demo` becomes package `com/example/demo`; the route version is the
+core version; the route filename is the core file. Artifact-level
+`maven-metadata.xml` is stored as a package-level file on `com/example/demo`;
+repository-level `archetype-catalog.xml` is stored as a format-level file.
+
+Release versions are immutable by default through the core store's normal
+create semantics. Snapshot routes overwrite when the route version ends with
+`-SNAPSHOT`, case-insensitive; this covers timestamped snapshot artifact files
+inside the snapshot directory and version-level snapshot metadata. Checksum
+uploads require the target file to already exist, verify the declared digest
+against that stored target, and return conflict when the target is missing so
+client upload-order bugs are visible. Proxy-mode Maven reads are deferred to
+the future proxy issue; writes to proxy namespaces return method-not-allowed.
 
 ## Non-goals / deferred (v1)
 

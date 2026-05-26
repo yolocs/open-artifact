@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
 )
@@ -50,12 +51,13 @@ type runtimeConfig struct {
 	LogDebug      bool
 
 	// Data-plane only. The authenticator is built from these by the serve
-	// wiring; format routes (#25) install the middleware.
+	// wiring; format routes install the middleware.
 	RepoType          string
 	DisableAuthn      bool
 	AuthnKind         string
 	AuthnOIDCIssuers  []string
 	AuthnOIDCAudience string
+	Maven             maven.Config
 	PyPI              pypi.Config
 	NPM               npm.Config
 
@@ -85,6 +87,7 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.String("authn-kind", "oidc", "authenticator kind: oidc")
 	f.StringSlice("authn-oidc-issuers", nil, "comma-separated OIDC issuer URLs")
 	f.String("authn-oidc-audience", "", "expected OIDC token audience")
+	f.Int64("maven-max-upload-bytes", maven.DefaultMaxUploadBytes, "maximum Maven artifact upload size in bytes; 0 uses the default cap")
 	f.Int64("pypi-max-upload-bytes", pypi.DefaultMaxUploadBytes, "maximum PyPI multipart upload size in bytes; 0 uses the default cap")
 	f.Duration("pypi-simple-index-cache-ttl", 60*time.Second, "per-process PyPI project simple-index cache TTL; 0 disables caching")
 	f.Duration("pypi-proxy-index-cache-ttl", pypi.DefaultProxyIndexCacheTTL, "in-process PyPI proxy upstream-index cache TTL (burst absorber); 0 uses the default, negative disables caching")
@@ -136,6 +139,7 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.AuthnKind = strings.TrimSpace(v.GetString("authn-kind"))
 		cfg.AuthnOIDCIssuers = splitCSV(v.GetStringSlice("authn-oidc-issuers"))
 		cfg.AuthnOIDCAudience = strings.TrimSpace(v.GetString("authn-oidc-audience"))
+		cfg.Maven.MaxUploadBytes = v.GetInt64("maven-max-upload-bytes")
 		cfg.PyPI.MaxUploadBytes = v.GetInt64("pypi-max-upload-bytes")
 		cfg.PyPI.SimpleIndexCacheTTL = v.GetDuration("pypi-simple-index-cache-ttl")
 		cfg.PyPI.ProxyIndexCacheTTL = v.GetDuration("pypi-proxy-index-cache-ttl")
@@ -190,6 +194,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.PyPI.SimpleIndexCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-simple-index-cache-ttl %s: must be >= 0", c.PyPI.SimpleIndexCacheTTL))
+		}
+		if c.Maven.MaxUploadBytes < 0 {
+			errs = append(errs, fmt.Errorf("invalid --maven-max-upload-bytes %d: must be >= 0", c.Maven.MaxUploadBytes))
 		}
 		if c.PyPI.ProxyNegativeCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-proxy-negative-cache-ttl %s: must be >= 0", c.PyPI.ProxyNegativeCacheTTL))

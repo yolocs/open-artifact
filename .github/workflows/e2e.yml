@@ -52,3 +52,18 @@ jobs:
       - name: npm proxy - download (real registry.npmjs.org)
         run: go test -race -tags=npmupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/npm
 
+  maven:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Verify Maven client
+        run: mvn -version
+      - name: Maven hosted - deploy + dependency:get
+        run: go test -race -tags=integration -run '^TestMavenDeployAndDependencyGet$' ./pkg/surface/maven

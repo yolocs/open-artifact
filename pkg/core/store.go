@@ -28,6 +28,16 @@ type Store interface {
 	// creation-time annotations via WithAnnotations.
 	AddPackage(ctx context.Context, name string, opts ...CreateOption) (Package, error)
 
+	// File returns a handle to a namespace-level File without performing I/O.
+	File(name string) File
+
+	// Files lists every namespace-level File in this Store.
+	Files(ctx context.Context) ([]File, error)
+
+	// AddFile uploads a namespace-level File. It behaves like Version.AddFile:
+	// immutable by default, digesting during upload, and recording per-file Meta.
+	AddFile(ctx context.Context, name string, body io.Reader, opts ...CreateOption) (File, error)
+
 	// Cache returns a handle to a format-level cache file by key (the .cache/
 	// subtree directly under the Store's namespace) without performing I/O.
 	Cache(key string) CacheFile
