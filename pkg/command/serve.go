@@ -14,6 +14,7 @@ import (
 	"github.com/yolocs/open-artifact/pkg/metrics"
 	"github.com/yolocs/open-artifact/pkg/namespace"
 	"github.com/yolocs/open-artifact/pkg/observability"
+	"github.com/yolocs/open-artifact/pkg/surface/debian"
 	"github.com/yolocs/open-artifact/pkg/surface/echo"
 	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
@@ -91,6 +92,9 @@ func buildDataPlaneHandler(cfg *runtimeConfig, reg *namespace.Registry, authn au
 	}
 	if cfg.RepoType == "npm" {
 		mux.Handle("/", observability.WrapWithFormat("npm", npm.Handler(reg, authn, cfg.NPM)))
+	}
+	if cfg.RepoType == "debian" {
+		mux.Handle("/", observability.WrapWithFormat("debian", debian.Handler(reg, authn, cfg.Debian)))
 	}
 	return mux
 }

@@ -12,12 +12,14 @@ const (
 	FormatNPM Format = "npm"
 	// FormatMaven is the Maven 2 repository layout.
 	FormatMaven Format = "maven"
+	// FormatDebian is the Debian/APT repository layout (proxy-only).
+	FormatDebian Format = "debian"
 )
 
 // IsKnown reports whether f is a Format this build understands.
 func (f Format) IsKnown() bool {
 	switch f {
-	case FormatPyPI, FormatNPM, FormatMaven:
+	case FormatPyPI, FormatNPM, FormatMaven, FormatDebian:
 		return true
 	default:
 		return false

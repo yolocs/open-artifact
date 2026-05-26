@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/yolocs/open-artifact/pkg/logging"
+	"github.com/yolocs/open-artifact/pkg/surface/debian"
 	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
@@ -70,6 +71,9 @@ func TestServeDefaults(t *testing.T) {
 		},
 		Maven: maven.Config{
 			MaxUploadBytes: maven.DefaultMaxUploadBytes,
+		},
+		Debian: debian.Config{
+			ProxyNegativeCacheTTL: debian.DefaultProxyNegativeCacheTTL,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {

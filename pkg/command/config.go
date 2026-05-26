@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"github.com/yolocs/open-artifact/pkg/surface/debian"
 	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
@@ -35,7 +36,7 @@ var reservedObservabilityPaths = map[string]bool{"/healthz": true, "/readyz": tr
 // repoTypes is the eventual allow-list of data-plane formats. Real serving is
 // out of scope here (#19-#25); this issue only validates the flag value. The
 // internal "echo" type is reserved for OIDC CI wiring (#25).
-var repoTypes = map[string]bool{"pypi": true, "npm": true, "maven": true, "echo": true}
+var repoTypes = map[string]bool{"pypi": true, "npm": true, "maven": true, "debian": true, "echo": true}
 
 // runtimeConfig is the resolved, validated runtime configuration shared by the
 // data and admin planes. Data-plane-only fields are populated for `serve` and
@@ -60,6 +61,7 @@ type runtimeConfig struct {
 	Maven             maven.Config
 	PyPI              pypi.Config
 	NPM               npm.Config
+	Debian            debian.Config
 
 	// authnKindSet records whether --authn-kind was set explicitly (by flag or
 	// env) rather than left at its default, so it can be flagged as mutually
@@ -82,7 +84,7 @@ func addSharedFlags(f *pflag.FlagSet, defaultPort int) {
 
 // addDataPlaneFlags registers the flags present only on `serve`.
 func addDataPlaneFlags(f *pflag.FlagSet) {
-	f.String("repo-type", "", "repository format: pypi, npm, maven")
+	f.String("repo-type", "", "repository format: pypi, npm, maven, debian")
 	f.Bool("disable-authn", false, "disable authentication (logs a warning)")
 	f.String("authn-kind", "oidc", "authenticator kind: oidc")
 	f.StringSlice("authn-oidc-issuers", nil, "comma-separated OIDC issuer URLs")
@@ -96,6 +98,7 @@ func addDataPlaneFlags(f *pflag.FlagSet) {
 	f.Duration("npm-proxy-packument-memo-ttl", npm.DefaultProxyPackumentMemoTTL, "in-process npm proxy packument memo TTL (burst absorber); 0 uses the default, negative disables the memo")
 	f.Duration("npm-proxy-packument-cache-ttl", npm.DefaultProxyPackumentCacheTTL, "durable npm proxy packument freshness window; 0 uses the default, negative serves the durable snapshot only as a stale fallback")
 	f.Duration("npm-proxy-negative-cache-ttl", npm.DefaultProxyNegativeCacheTTL, "how long an upstream npm 404 is remembered in proxy mode; 0 uses the default")
+	f.Duration("debian-proxy-negative-cache-ttl", debian.DefaultProxyNegativeCacheTTL, "how long an upstream Debian 404 is remembered in proxy mode; 0 uses the default")
 }
 
 // newViper builds a viper bound to cmd's flags with OPEN_ARTIFACT env
@@ -148,6 +151,7 @@ func resolveConfig(cmd *cobra.Command, dataPlane bool) (*runtimeConfig, error) {
 		cfg.NPM.ProxyPackumentMemoTTL = v.GetDuration("npm-proxy-packument-memo-ttl")
 		cfg.NPM.ProxyPackumentCacheTTL = v.GetDuration("npm-proxy-packument-cache-ttl")
 		cfg.NPM.ProxyNegativeCacheTTL = v.GetDuration("npm-proxy-negative-cache-ttl")
+		cfg.Debian.ProxyNegativeCacheTTL = v.GetDuration("debian-proxy-negative-cache-ttl")
 		_, authnKindEnv := os.LookupEnv(envPrefix + "_AUTHN_KIND")
 		cfg.authnKindSet = cmd.Flags().Changed("authn-kind") || authnKindEnv
 	}
@@ -187,7 +191,7 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 
 	if dataPlane {
 		if c.RepoType != "" && !repoTypes[c.RepoType] {
-			errs = append(errs, fmt.Errorf("unsupported --repo-type %q: want pypi, npm, or maven", c.RepoType))
+			errs = append(errs, fmt.Errorf("unsupported --repo-type %q: want pypi, npm, maven, or debian", c.RepoType))
 		}
 		if c.PyPI.MaxUploadBytes < 0 {
 			errs = append(errs, fmt.Errorf("invalid --pypi-max-upload-bytes %d: must be >= 0", c.PyPI.MaxUploadBytes))
@@ -206,6 +210,9 @@ func (c *runtimeConfig) validate(dataPlane bool) error {
 		}
 		if c.NPM.ProxyNegativeCacheTTL < 0 {
 			errs = append(errs, fmt.Errorf("invalid --npm-proxy-negative-cache-ttl %s: must be >= 0", c.NPM.ProxyNegativeCacheTTL))
+		}
+		if c.Debian.ProxyNegativeCacheTTL < 0 {
+			errs = append(errs, fmt.Errorf("invalid --debian-proxy-negative-cache-ttl %s: must be >= 0", c.Debian.ProxyNegativeCacheTTL))
 		}
 		errs = append(errs, c.validateAuthn()...)
 	}
