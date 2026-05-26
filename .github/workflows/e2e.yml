@@ -67,3 +67,7 @@ jobs:
         run: mvn -version
       - name: Maven hosted - deploy + dependency:get
         run: go test -race -tags=integration -run '^TestMavenDeployAndDependencyGet$' ./pkg/surface/maven
+      - name: Maven proxy - dependency:get (in-process upstream)
+        run: go test -race -tags=integration -run '^TestMavenProxyDependencyGet$' ./pkg/surface/maven
+      - name: Maven proxy - download (real repo1.maven.org)
+        run: go test -race -tags=mavenupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/maven

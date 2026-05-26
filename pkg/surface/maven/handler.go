@@ -17,9 +17,23 @@ import (
 
 const DefaultMaxUploadBytes int64 = 100 << 20
 
+// Proxy-mode defaults. Maven metadata is small and fetched live, so the
+// upstream body cap only needs to bound a pathological metadata document; the
+// negative TTL bounds how long an upstream 404 (artifact or metadata) is
+// remembered. Artifact bytes are streamed straight through (tee-to-store), so
+// there is no artifact buffer to cap.
+const (
+	DefaultProxyMetadataMaxBytes int64 = 32 << 20
+	DefaultProxyNegativeCacheTTL       = 30 * time.Second
+)
+
 type Config struct {
 	MaxUploadBytes int64
 	AllowOverwrite bool
+
+	// Proxy-mode knobs. A zero value falls back to the matching Default above.
+	ProxyMetadataMaxBytes int64
+	ProxyNegativeCacheTTL time.Duration
 }
 
 func (c Config) uploadLimit() int64 {
@@ -29,15 +43,24 @@ func (c Config) uploadLimit() int64 {
 	return c.MaxUploadBytes
 }
 
+func (c Config) proxyMetadataMaxBytes() int64 {
+	if c.ProxyMetadataMaxBytes <= 0 {
+		return DefaultProxyMetadataMaxBytes
+	}
+	return c.ProxyMetadataMaxBytes
+}
+
 func Handler(reg *namespace.Registry, authn auth.Authenticator, cfg Config) http.Handler {
-	h := &handler{reg: reg, opts: cfg, now: time.Now}
+	now := time.Now
+	h := &handler{reg: reg, opts: cfg, now: now, proxy: newProxyEngine(cfg, now)}
 	return auth.Middleware(authn)(http.HandlerFunc(h.serveHTTP))
 }
 
 type handler struct {
-	reg  *namespace.Registry
-	opts Config
-	now  func() time.Time
+	reg   *namespace.Registry
+	opts  Config
+	now   func() time.Time
+	proxy *proxyEngine
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -112,10 +135,26 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if spec.IsProxy() {
-		surface.WriteStoreError(w, r, core.ErrUnsupported)
+		pstore, ok := h.authorizedProxyStore(w, r, p.Namespace)
+		if !ok {
+			return
+		}
+		h.proxy.serve(w, r, p, p.Namespace, spec, pstore)
 		return
 	}
 	surface.RedirectOrStreamFile(w, r, h.file(store, p, p.File), contentType(p))
+}
+
+// authorizedProxyStore authorizes the caller against the namespace reader policy
+// and returns an unguarded store for pull-through cache fills.
+func (h *handler) authorizedProxyStore(w http.ResponseWriter, r *http.Request, ns string) (core.Store, bool) {
+	ac := auth.FromContext(r.Context())
+	store, _, err := h.reg.AuthorizedProxyStore(r.Context(), ns, mavenFormat, ac)
+	if err != nil {
+		surface.WriteNamespaceError(w, r, err, surface.NamespaceDataRead)
+		return nil, false
+	}
+	return store, true
 }
 
 func (h *handler) authorizedStore(w http.ResponseWriter, r *http.Request, ns string, write bool) (core.Store, namespace.Spec, error) {
