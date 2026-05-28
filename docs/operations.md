@@ -57,7 +57,7 @@ These exist on `serve` only.
 
 | Flag                            | Env var                                     | Default | Notes |
 | ------------------------------- | ------------------------------------------- | ------- | ----- |
-| `--repo-type`                   | `OPEN_ARTIFACT_REPO_TYPE`                   | _(empty)_ | Served today: `pypi`, `npm`, `maven`, `debian`; internal `echo` is reserved for OIDC CI. `debian` is proxy-only. |
+| `--repo-type`                   | `OPEN_ARTIFACT_REPO_TYPE`                   | _(empty)_ | Served today: `pypi`, `npm`, `maven`, `debian`, `generic`; internal `echo` is reserved for OIDC CI. `debian` is proxy-only; `generic` is hosted-only. |
 | `--disable-authn`               | `OPEN_ARTIFACT_DISABLE_AUTHN`               | `false` | Disables authentication. |
 | `--authn-kind`                  | `OPEN_ARTIFACT_AUTHN_KIND`                  | `oidc`  | Only `oidc` is supported. |
 | `--authn-oidc-issuers`          | `OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS`          | _(empty)_ | Comma-separated issuer URLs. |
@@ -72,6 +72,36 @@ These exist on `serve` only.
 | `--npm-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_NPM_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream npm 404 is remembered in proxy mode; 0 uses the default. |
 | `--maven-max-upload-bytes`      | `OPEN_ARTIFACT_MAVEN_MAX_UPLOAD_BYTES`      | `104857600` | Maximum Maven artifact/metadata/checksum upload size; 0 uses the default cap. |
 | `--debian-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_DEBIAN_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream Debian 404 is remembered in proxy mode; 0 uses the default. |
+| `--generic-max-upload-bytes`    | `OPEN_ARTIFACT_GENERIC_MAX_UPLOAD_BYTES`    | `104857600` | Maximum generic file upload size; 0 uses the default cap. |
+| `--generic-allow-overwrite`     | `OPEN_ARTIFACT_GENERIC_ALLOW_OVERWRITE`     | `false` | Allow generic file uploads to overwrite an existing file (default immutable). |
+
+## Generic REST API
+
+`--repo-type=generic` serves open-artifact's native REST API for arbitrary
+artifacts (hosted only; a proxy-mode generic namespace returns `501`). Routes
+live under `/{namespace}/generic`. Packages and versions are idempotent
+containers (`PUT` upserts metadata; optional `{"annotations": {…}}` body); files
+are immutable content (`PUT` create-once, `409` on re-upload unless
+`--generic-allow-overwrite`). Uploads stream to the backend and are capped by
+`--generic-max-upload-bytes`; optional `X-Checksum-Sha256`/`-Sha1`/`-Sha512`
+headers (lowercase hex) are verified during the write. Deletion is not yet
+available — `DELETE` returns `405`.
+
+```bash
+# Upload a file (auto-creates package "app" and version "1.0.0").
+curl -X PUT --data-binary @app.tar.gz \
+  -H 'Content-Type: application/gzip' \
+  -H "X-Checksum-Sha256: $(sha256sum app.tar.gz | cut -d' ' -f1)" \
+  http://localhost:8080/myteam/generic/packages/app/versions/1.0.0/files/app-1.0.0.tar.gz
+
+# List packages, versions, and files.
+curl http://localhost:8080/myteam/generic/packages
+curl http://localhost:8080/myteam/generic/packages/app
+curl http://localhost:8080/myteam/generic/packages/app/versions/1.0.0/files
+
+# Download it back.
+curl -O http://localhost:8080/myteam/generic/packages/app/versions/1.0.0/files/app-1.0.0.tar.gz
+```
 
 ## Storage backends
 

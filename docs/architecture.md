@@ -11,8 +11,9 @@ This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
 logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
 proxy serving, the npm hosted and proxy surfaces, Maven hosted and proxy
-serving, the Debian (APT) proxy surface, and the shared proxy primitives exist
-today. Where it matters, sections note what is implemented versus planned.
+serving, the Debian (APT) proxy surface, the generic hosted REST surface, and
+the shared proxy primitives exist today. Where it matters, sections note what is
+implemented versus planned.
 
 ## What this project is
 
@@ -20,9 +21,11 @@ open-artifact is a lightweight, stateless, multi-format artifact registry. It
 speaks native package-manager protocols — **PyPI, npm, and Maven** (hosted +
 proxy) and **Debian/APT** (proxy only) — on the front and stores everything
 (blobs, API objects, dist-tags, namespace metadata, proxy caches) as plain
-objects in a single **`gocloud.dev/blob` bucket** on the back. No external
-database, no bespoke metadata store: the bucket's directory tree *is* the
-index.
+objects in a single **`gocloud.dev/blob` bucket** on the back. It also exposes a
+**generic** format — open-artifact's own small REST API (hosted only) over the
+same nouns — for arbitrary artifacts that have no package-manager protocol. No
+external database, no bespoke metadata store: the bucket's directory tree *is*
+the index.
 
 It is a small, open-source alternative to Artifactory or Nexus for teams who
 already run an object store (S3 / GCS / Azure Blob / filesystem) and don't
@@ -76,6 +79,10 @@ These hold across the whole system; everything below is built to preserve them.
    Debian is proxy-only because APT has no interoperable upload protocol (a
    hosted Debian repo would require open-artifact to own index generation and
    GPG signing — out of scope and at odds with the no-second-store invariant).
+   The generic format is the exception that proves the rule: it is hosted-only
+   and speaks open-artifact's *own* REST protocol rather than a third party's, so
+   it is the thinnest possible mapping onto the shared framework and the core
+   nouns.
 
 ## Dependency rule
 
@@ -134,6 +141,7 @@ pkg/
     npm/             ← npm registry hosted + pull-through proxy
     maven/           ← Maven 2 layout hosted + pull-through proxy
     debian/          ← Debian/APT layout, pull-through proxy only
+    generic/         ← native REST artifact API, hosted only
 docs/
 ```
 
@@ -311,7 +319,7 @@ client with constant memory, sizing the response from the recorded `Meta`.
   package data (a non-dot child under any non-dot format directory); a
   `.meta`/`.cache`-only namespace is empty.
 - **Registry** (`pkg/namespace`) is the data-plane factory: `For(ns, fmt)`
-  validates the namespace name and format (`pypi`, `npm`, `maven`, `debian`) and yields a
+  validates the namespace name and format (`pypi`, `npm`, `maven`, `debian`, `generic`) and yields a
   `Scoped` handle whose `Store()` is a `blobstore.Store` bound to scope
   `<ns>/<fmt>` and whose `Spec(ctx)` resolves the namespace spec live — admin
   changes are visible without restart, and an unknown namespace maps to
@@ -849,11 +857,72 @@ exposes no reliable per-file publish time, so a `delay` filter that needs one
 **fails closed** (denied), as the Maven proxy does when metadata is missing;
 `allow`/`deny` filters work fully.
 
+## Generic hosted surface
+
+The generic surface (`pkg/surface/generic`, mounted for `--repo-type=generic`)
+is open-artifact's **native REST API** for arbitrary artifacts: a thin mapping
+onto the `Package → Version → File` nouns with no external wire protocol to
+satisfy. It is the smallest surface — the only format-specific code is the
+routing and the JSON metadata representation; everything else (namespace lookup
+and authz, error→HTTP mapping, redirect-or-stream downloads, upload caps,
+metrics/op labeling) is the shared `surface` framework.
+
+It is **hosted only** in v1. A generic "proxy" has no standard upstream layout to
+pull through, so a proxy-mode generic namespace returns `501` (proxy support is a
+separate design). **Deletion is deferred**: the pure `core` has no `Delete` verbs
+yet (see "Non-goals"), so `DELETE` routes are unregistered and the mux answers
+them `405` with an `Allow` header until that design pass lands.
+
+Routes live under `/{namespace}/generic`:
+
+```
+GET  /packages                                          list package names
+GET  /packages/{package}                                package metadata + version names
+PUT  /packages/{package}                                create/update a package (optional annotations body)
+GET  /packages/{package}/versions                       list version names
+GET  /packages/{package}/versions/{version}             version metadata + file names
+PUT  /packages/{package}/versions/{version}             create/update a version (optional annotations body)
+GET  /packages/{package}/versions/{version}/files       list files (name, size, digest, content_type)
+PUT  /packages/{package}/versions/{version}/files/{f}   upload a file (streamed)
+GET  /packages/{package}/versions/{version}/files/{f}   download a file (redirect-or-stream; HEAD supported)
+```
+
+- **Containers vs. content.** Packages and versions are idempotent containers:
+  `PUT` upserts the `.meta` envelope and an optional `{"annotations": {…}}` body
+  (annotations replace wholesale, `CreatedAt` preserved), returning `201` on
+  create and `200` on update. Files are immutable content: `PUT` is create-once
+  and returns `409` on re-upload unless `--generic-allow-overwrite` is set.
+  Uploading a file auto-creates its parent package and version (like the Maven
+  surface's `ensureParents`).
+- **Collections vs. resources.** The list routes return a possibly-empty list
+  with `200` even when the parent is absent; a single-resource `GET` (a package
+  or a version) returns `404` when absent. The namespace itself still maps to
+  `404` (unknown) / `403` (denied) through the shared helpers.
+- **Streaming + integrity.** The upload body is streamed straight into
+  `Version.AddFile` (rolling SHA-256 during the write, no buffering) and capped
+  by `--generic-max-upload-bytes` (`413` over-cap). Optional
+  `X-Checksum-Sha256`/`-Sha1`/`-Sha512` headers (lowercase hex) are verified via
+  `WithExpectedDigests` *during* the streamed write — a mismatch aborts before
+  commit (`422`), a malformed header is `400`. The upload `Content-Type` is
+  recorded as the `generic:content_type` annotation and served back on download
+  (falling back to an extension guess, then `application/octet-stream`).
+- **Names** (package, version, file) are single path segments — clients
+  percent-encode reserved characters. The codec forwards names to the Store
+  unchanged; `blobstore` owns path-safe encoding and rejects empty/leading-dot
+  names (`ErrInvalidName` → `400`).
+- **Auth.** Reads authorize `OpRead`, writes `OpWrite`, enforced below the
+  surface in the guarded Store exactly as the other hosted formats.
+
 ## Non-goals / deferred (v1)
 
-- **Deletion / yank / unpublish of packages** — semantics differ across
-  formats; a separate design pass. (Deleting an *empty* namespace is supported;
-  emptiness is derived from listing, not a side index.)
+- **Deletion / yank / unpublish of packages** — the core nouns expose no
+  `Delete` (only `core.CacheFile` does); semantics differ across formats, so it
+  is a separate design pass. The generic surface — which owns its own protocol —
+  is the natural place to introduce it, but ships first without it (`DELETE` →
+  `405`). (Deleting an *empty* namespace is supported; emptiness is derived from
+  listing, not a side index.)
+- **Generic proxy mode** — the generic format is hosted-only in v1; a proxy-mode
+  generic namespace returns `501`.
 - **Multi-replica `SetTag`** — v1 guards the per-tag read-modify-write with an
   in-process mutex; multi-replica needs CAS / conditional writes at the bucket
   layer.
