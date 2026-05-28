@@ -18,6 +18,7 @@ func TestFormatIsKnown(t *testing.T) {
 		{name: "npm", format: core.FormatNPM, want: true},
 		{name: "maven", format: core.FormatMaven, want: true},
 		{name: "debian", format: core.FormatDebian, want: true},
+		{name: "generic", format: core.FormatGeneric, want: true},
 		{name: "empty", format: core.Format(""), want: false},
 		{name: "unknown", format: core.Format("cargo"), want: false},
 		{name: "wrong case", format: core.Format("PyPI"), want: false},
@@ -47,6 +48,7 @@ func TestFormatStringRoundTrip(t *testing.T) {
 		{name: "npm", in: "npm", want: core.FormatNPM, ok: true},
 		{name: "maven", in: "maven", want: core.FormatMaven, ok: true},
 		{name: "debian", in: "debian", want: core.FormatDebian, ok: true},
+		{name: "generic", in: "generic", want: core.FormatGeneric, ok: true},
 		{name: "unknown", in: "cargo", want: core.Format("cargo"), ok: false},
 	}
 

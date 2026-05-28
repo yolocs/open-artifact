@@ -12,6 +12,7 @@ import (
 
 	"github.com/yolocs/open-artifact/pkg/logging"
 	"github.com/yolocs/open-artifact/pkg/surface/debian"
+	"github.com/yolocs/open-artifact/pkg/surface/generic"
 	"github.com/yolocs/open-artifact/pkg/surface/maven"
 	"github.com/yolocs/open-artifact/pkg/surface/npm"
 	"github.com/yolocs/open-artifact/pkg/surface/pypi"
@@ -74,6 +75,9 @@ func TestServeDefaults(t *testing.T) {
 		},
 		Debian: debian.Config{
 			ProxyNegativeCacheTTL: debian.DefaultProxyNegativeCacheTTL,
+		},
+		Generic: generic.Config{
+			MaxUploadBytes: generic.DefaultMaxUploadBytes,
 		},
 	}
 	if diff := cmp.Diff(want, cfg, cmpopts.IgnoreUnexported(runtimeConfig{})); diff != "" {

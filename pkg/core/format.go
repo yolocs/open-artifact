@@ -14,12 +14,16 @@ const (
 	FormatMaven Format = "maven"
 	// FormatDebian is the Debian/APT repository layout (proxy-only).
 	FormatDebian Format = "debian"
+	// FormatGeneric is open-artifact's native REST artifact API (hosted-only in
+	// v1): a thin mapping onto the core Package/Version/File nouns with no
+	// external package-manager protocol.
+	FormatGeneric Format = "generic"
 )
 
 // IsKnown reports whether f is a Format this build understands.
 func (f Format) IsKnown() bool {
 	switch f {
-	case FormatPyPI, FormatNPM, FormatMaven, FormatDebian:
+	case FormatPyPI, FormatNPM, FormatMaven, FormatDebian, FormatGeneric:
 		return true
 	default:
 		return false
