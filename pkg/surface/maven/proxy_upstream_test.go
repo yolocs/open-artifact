@@ -1,4 +1,4 @@
-//go:build mavenupstream
+//go:build integration
 
 package maven_test
 
@@ -17,7 +17,7 @@ import (
 // passthrough and artifact cache fill without a package-manager client. Run it
 // with:
 //
-//	go test -tags=mavenupstream -run TestProxyLiveUpstream ./pkg/surface/maven
+//	go test -tags=integration -run TestProxyLiveUpstream ./pkg/surface/maven
 //
 // Controllable scenarios (404/500, oversized metadata, filters, delay,
 // checksum synthesis, negative cache) are covered by the in-process fakes in

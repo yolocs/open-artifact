@@ -19,9 +19,10 @@ const defaultPolicyCacheTTL = 60 * time.Second
 // allowedFormats is the set of data-plane formats a namespace may be scoped
 // to. Future formats must be added explicitly.
 var allowedFormats = map[string]bool{
-	string(core.FormatPyPI):  true,
-	string(core.FormatNPM):   true,
-	string(core.FormatMaven): true,
+	string(core.FormatPyPI):   true,
+	string(core.FormatNPM):    true,
+	string(core.FormatMaven):  true,
+	string(core.FormatDebian): true,
 }
 
 // Registry is the data-plane namespace factory. It yields namespace-and-format
@@ -101,7 +102,7 @@ func (r *Registry) For(namespace, format string) (*Scoped, error) {
 		return nil, err
 	}
 	if !allowedFormats[format] {
-		return nil, fmt.Errorf("namespace: unsupported format %q: want pypi, npm, or maven", format)
+		return nil, fmt.Errorf("namespace: unsupported format %q: want pypi, npm, maven, or debian", format)
 	}
 	return &Scoped{registry: r, namespace: namespace, format: format}, nil
 }

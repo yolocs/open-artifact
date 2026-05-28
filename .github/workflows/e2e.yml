@@ -50,7 +50,7 @@ jobs:
       - name: npm proxy - install (in-process upstream)
         run: go test -race -tags=integration -run '^TestNPMProxyInstall$' ./pkg/surface/npm
       - name: npm proxy - download (real registry.npmjs.org)
-        run: go test -race -tags=npmupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/npm
+        run: go test -race -tags=integration -run '^TestProxyLiveUpstream$' ./pkg/surface/npm
 
   maven:
     runs-on: ubuntu-latest
@@ -70,4 +70,19 @@ jobs:
       - name: Maven proxy - dependency:get (in-process upstream)
         run: go test -race -tags=integration -run '^TestMavenProxyDependencyGet$' ./pkg/surface/maven
       - name: Maven proxy - download (real repo1.maven.org)
-        run: go test -race -tags=mavenupstream -run '^TestProxyLiveUpstream$' ./pkg/surface/maven
+        run: go test -race -tags=integration -run '^TestProxyLiveUpstream$' ./pkg/surface/maven
+
+  debian:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Verify APT client
+        run: apt-get --version && dpkg --print-architecture
+      - name: Debian proxy - apt-get update + download (in-process upstream)
+        run: go test -race -tags=integration -run '^TestDebianProxyAptGetDownload$' ./pkg/surface/debian
+      - name: Debian proxy - apt-get update + download (real archive.ubuntu.com)
+        run: go test -race -tags=integration -run '^TestProxyLiveUpstream$' ./pkg/surface/debian
+

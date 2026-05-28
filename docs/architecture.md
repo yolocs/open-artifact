@@ -10,19 +10,19 @@ for how to run and configure the binary see
 This describes the target architecture. The `core` substrate with its
 `blobstore` implementation, the runtime foundation (CLI, bucket opener,
 logging, server lifecycle), namespaces, auth, observability, PyPI hosted and
-proxy serving, the npm hosted and proxy surfaces, Maven hosted serving, and
-the shared proxy primitives exist today; Maven proxy mode is described here as
-the design being built toward. Where it matters, sections note what is
-implemented versus planned.
+proxy serving, the npm hosted and proxy surfaces, Maven hosted and proxy
+serving, the Debian (APT) proxy surface, and the shared proxy primitives exist
+today. Where it matters, sections note what is implemented versus planned.
 
 ## What this project is
 
 open-artifact is a lightweight, stateless, multi-format artifact registry. It
-speaks native package-manager protocols — **PyPI, npm, and Maven** — on the
-front and stores everything (blobs, API objects, dist-tags, namespace
-metadata, proxy caches) as plain objects in a single **`gocloud.dev/blob`
-bucket** on the back. No external database, no bespoke metadata store: the
-bucket's directory tree *is* the index.
+speaks native package-manager protocols — **PyPI, npm, and Maven** (hosted +
+proxy) and **Debian/APT** (proxy only) — on the front and stores everything
+(blobs, API objects, dist-tags, namespace metadata, proxy caches) as plain
+objects in a single **`gocloud.dev/blob` bucket** on the back. No external
+database, no bespoke metadata store: the bucket's directory tree *is* the
+index.
 
 It is a small, open-source alternative to Artifactory or Nexus for teams who
 already run an object store (S3 / GCS / Azure Blob / filesystem) and don't
@@ -70,13 +70,17 @@ These hold across the whole system; everything below is built to preserve them.
 3. **The namespace is the canonical partition.** Everything that belongs to a
    namespace lives under its subtree in the bucket; the bucket layout, scoping,
    and authz all key off it.
-4. **One product, three formats.** PyPI, npm, and Maven share one framework and
-   behave identically except where the wire protocol genuinely differs.
+4. **One product, one framework across formats.** PyPI, npm, Maven, and Debian
+   share one framework and behave identically except where the wire protocol
+   genuinely differs. PyPI/npm/Maven support both hosted and proxy modes;
+   Debian is proxy-only because APT has no interoperable upload protocol (a
+   hosted Debian repo would require open-artifact to own index generation and
+   GPG signing — out of scope and at odds with the no-second-store invariant).
 
 ## Dependency rule
 
 ```
-package manager ──HTTP──▶ surface (pypi|npm|maven) ──▶ namespace-scoped core.Store ──▶ blob.Bucket
+package manager ──HTTP──▶ surface (pypi|npm|maven|debian) ──▶ namespace-scoped core.Store ──▶ blob.Bucket
                               │   ▲          │              ▲
             OIDC authn + ─────┘   │          └─ proxy ──────┘ (pull-through cache for proxy namespaces)
             per-ns authz          │             upstream client
@@ -128,7 +132,8 @@ pkg/
   surface/           ← Handler interface + shared HTTP/error/redirect helpers + test harness (planned framework)
     pypi/            ← PEP 503/691 hosted + pull-through proxy
     npm/             ← npm registry hosted + pull-through proxy
-    maven/           ← Maven 2 layout hosted (proxy planned)
+    maven/           ← Maven 2 layout hosted + pull-through proxy
+    debian/          ← Debian/APT layout, pull-through proxy only
 docs/
 ```
 
@@ -289,7 +294,7 @@ client with constant memory, sizing the response from the recorded `Meta`.
 - **Name validation:** 1–64 chars, lowercase ASCII letters/digits/`-`, no
   leading/trailing `-`, no leading `_`/`.`; reject reserved names (`admin`,
   `healthz`, `readyz`, `metrics`, `simple`, `maven2`, `v2`, `npm`, `pypi`,
-  `_control`, `_proxy-cache`, `open-artifact`).
+  `debian`, `_control`, `_proxy-cache`, `open-artifact`).
 - **Spec** carries `schema_version` (current = 1), `mode` (empty/`hosted` or
   `proxy`), `policy` (readers/writers subject matchers), `proxy`
   (upstream + filters), and an opaque `format` map that must round-trip
@@ -306,7 +311,7 @@ client with constant memory, sizing the response from the recorded `Meta`.
   package data (a non-dot child under any non-dot format directory); a
   `.meta`/`.cache`-only namespace is empty.
 - **Registry** (`pkg/namespace`) is the data-plane factory: `For(ns, fmt)`
-  validates the namespace name and format (`pypi`, `npm`, `maven`) and yields a
+  validates the namespace name and format (`pypi`, `npm`, `maven`, `debian`) and yields a
   `Scoped` handle whose `Store()` is a `blobstore.Store` bound to scope
   `<ns>/<fmt>` and whose `Spec(ctx)` resolves the namespace spec live — admin
   changes are visible without restart, and an unknown namespace maps to
@@ -785,6 +790,64 @@ uploads require the target file to already exist, verify the declared digest
 against that stored target, and return conflict when the target is missing so
 client upload-order bugs are visible. Proxy-mode Maven reads are deferred to
 the future proxy issue; writes to proxy namespaces return method-not-allowed.
+
+## Debian (APT) proxy surface
+
+The Debian surface (`pkg/surface/debian`, mounted for `--repo-type=debian`)
+serves Debian/APT repository paths below `/{namespace}/debian`. It is
+**proxy-only**: Debian has no interoperable "publish a `.deb` over HTTP"
+protocol — packages are published by regenerating and GPG-signing the
+repository indexes with tools like `reprepro`/`aptly` — so a hosted Debian
+surface has nothing meaningful to accept. Every write method returns `405`
+(`Allow: GET, HEAD`). A hosted (non-proxy) Debian namespace serves read-only
+from local storage (404 when empty), which lets an out-of-band bucket sync work
+but is not a first-class path.
+
+A request path after `/{namespace}/debian/` is the upstream-relative repository
+path; the codec classifies it by its top-level directory and rejects anything
+else (`404`):
+
+- **`dists/...` — index files** (`InRelease`, `Release`, `Release.gpg`, and the
+  per-component/architecture `Packages[.gz|.xz]`, `Sources`, `Contents`,
+  `by-hash`, …). These are **pulled from upstream and cached**, served
+  **byte-for-byte**: APT verifies a `Packages` file against the checksums in
+  `Release` and `Release` against its GPG signature, all rooted in the client's
+  configured key, so the proxy must never parse, rewrite, re-sign, or
+  synthesize them. On each request the surface fetches upstream and **streams
+  the bytes straight through to the client while teeing them into a durable
+  `.cache/` entry** keyed by the upstream-relative path (no full-document
+  buffering — `Packages` can be tens of MB). The durable copy is a write-through
+  served **only as a stale fallback** when upstream is unavailable (the PyPI
+  proxy shape, not the npm fresh-window shape): on a transport failure or 5xx
+  the cached copy is served at any age, else `503`. A clean upstream `404` is
+  negative-cached and returned as `404`. Index files are **never** subject to
+  the filter chain. `HEAD` answers from an upstream `HEAD`, falling back to the
+  cached copy's existence when upstream is down.
+- **`pool/...` — artifacts** (`*.deb`, `*.udeb`, `*.dsc`, `*.tar.*`, …). These
+  are cached as real Files exactly like the other proxies: a local hit is served
+  (redirect-or-stream); a cold miss evaluates the namespace filter chain, then
+  **streams** the upstream bytes through open-artifact (never redirecting the
+  client to upstream) with a **tee into the Store** (`surface.TeeStreamToStore`),
+  recording the package envelope on a clean fill so the cache survives a
+  restart. `.deb`/`.udeb` are served as `application/vnd.debian.binary-package`.
+
+**Pool → core mapping.** A pool artifact maps to the `Package → Version → File`
+nouns exactly like every other format — no Debian-specific layout. The package
+name and version are parsed from the filename
+(`<name>_<version>_<arch>.deb`; Debian versions never contain `_`, so splitting
+on `_` is unambiguous), and the filename is the core file:
+`pool/main/h/hello/hello_2.10-2_amd64.deb` → `Package("hello").Version("2.10-2").File("hello_2.10-2_amd64.deb")`.
+This is collision-free for the same reason PyPI's `(project, version, filename)`
+mapping is: a Debian `.deb`/source filename is unique within a repository, so two
+distinct upstream pool paths never map to the same triple. The pool *directory*
+is not stored — it is redundant for serving (the request always carries the full
+path, and the upstream URL is built by joining the namespace's upstream base with
+the *still-escaped* request path so the bytes APT verifies are forwarded
+unchanged) — but is recorded in the file annotations (`debian:pool_path`) for
+traceability. The same parsed package/version feed the filter `Ref`. Debian
+exposes no reliable per-file publish time, so a `delay` filter that needs one
+**fails closed** (denied), as the Maven proxy does when metadata is missing;
+`allow`/`deny` filters work fully.
 
 ## Non-goals / deferred (v1)
 

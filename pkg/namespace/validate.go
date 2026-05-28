@@ -44,6 +44,7 @@ var reservedNames = map[string]bool{
 	"v2":            true,
 	"npm":           true,
 	"pypi":          true,
+	"debian":        true,
 	"_control":      true,
 	"_proxy-cache":  true,
 	"open-artifact": true,

@@ -57,7 +57,7 @@ These exist on `serve` only.
 
 | Flag                            | Env var                                     | Default | Notes |
 | ------------------------------- | ------------------------------------------- | ------- | ----- |
-| `--repo-type`                   | `OPEN_ARTIFACT_REPO_TYPE`                   | _(empty)_ | Served today: `pypi`, `npm`, `maven`; internal `echo` is reserved for OIDC CI. |
+| `--repo-type`                   | `OPEN_ARTIFACT_REPO_TYPE`                   | _(empty)_ | Served today: `pypi`, `npm`, `maven`, `debian`; internal `echo` is reserved for OIDC CI. `debian` is proxy-only. |
 | `--disable-authn`               | `OPEN_ARTIFACT_DISABLE_AUTHN`               | `false` | Disables authentication. |
 | `--authn-kind`                  | `OPEN_ARTIFACT_AUTHN_KIND`                  | `oidc`  | Only `oidc` is supported. |
 | `--authn-oidc-issuers`          | `OPEN_ARTIFACT_AUTHN_OIDC_ISSUERS`          | _(empty)_ | Comma-separated issuer URLs. |
@@ -71,6 +71,7 @@ These exist on `serve` only.
 | `--npm-proxy-packument-cache-ttl` | `OPEN_ARTIFACT_NPM_PROXY_PACKUMENT_CACHE_TTL` | `10m` | Durable npm proxy packument freshness window; 0 uses the default, negative uses snapshots only as stale fallback. |
 | `--npm-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_NPM_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream npm 404 is remembered in proxy mode; 0 uses the default. |
 | `--maven-max-upload-bytes`      | `OPEN_ARTIFACT_MAVEN_MAX_UPLOAD_BYTES`      | `104857600` | Maximum Maven artifact/metadata/checksum upload size; 0 uses the default cap. |
+| `--debian-proxy-negative-cache-ttl` | `OPEN_ARTIFACT_DEBIAN_PROXY_NEGATIVE_CACHE_TTL` | `30s` | How long an upstream Debian 404 is remembered in proxy mode; 0 uses the default. |
 
 ## Storage backends
 

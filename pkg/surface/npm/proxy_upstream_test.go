@@ -1,4 +1,4 @@
-//go:build npmupstream
+//go:build integration
 
 package npm_test
 
@@ -16,7 +16,7 @@ import (
 // stable package — to exercise the real packument shape and tarball fill
 // without a package-manager client. Run it with:
 //
-//	go test -tags=npmupstream -run TestProxyLiveUpstream ./pkg/surface/npm
+//	go test -tags=integration -run TestProxyLiveUpstream ./pkg/surface/npm
 //
 // Controllable scenarios (404/500, stale and synthesized fallback, filters,
 // negative cache, scoped encoding) are covered by the in-process fakes in
