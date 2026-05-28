@@ -1,4 +1,4 @@
-//go:build debianupstream
+//go:build integration
 
 package debian_test
 
@@ -23,7 +23,7 @@ import (
 // `[trusted=yes]`: apt verifies the InRelease signature against the host's
 // system keyring, so a passing `apt-get update` proves our proxy served the
 // signed index byte-for-byte. `apt-get download hello` then proves a real .deb
-// flows through the pull-through cache. It is gated behind the `debianupstream`
+// flows through the pull-through cache. It is gated behind the `integration`
 // build tag (network-dependent) and skips when the mirror is unreachable.
 func TestProxyLiveUpstream(t *testing.T) {
 	t.Parallel()

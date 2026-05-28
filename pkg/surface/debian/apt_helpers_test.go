@@ -1,4 +1,4 @@
-//go:build integration || debianupstream
+//go:build integration
 
 package debian_test
 
