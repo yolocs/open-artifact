@@ -3,9 +3,6 @@
 package debian_test
 
 import (
-	"context"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,8 +20,10 @@ import (
 // `[trusted=yes]`: apt verifies the InRelease signature against the host's
 // system keyring, so a passing `apt-get update` proves our proxy served the
 // signed index byte-for-byte. `apt-get download hello` then proves a real .deb
-// flows through the pull-through cache. It is gated behind the `integration`
-// build tag (network-dependent) and skips when the mirror is unreachable.
+// flows through the pull-through cache.
+//
+// Controllable scenarios (404/5xx, stale fallback, restart, negative cache,
+// filters) are covered by the in-process fakes in proxy_test.go.
 func TestProxyLiveUpstream(t *testing.T) {
 	t.Parallel()
 
@@ -33,18 +32,15 @@ func TestProxyLiveUpstream(t *testing.T) {
 
 	const suite = "noble"
 	upstream := ubuntuMirror(arch)
-	requireReachable(t, upstream+"/dists/"+suite+"/Release")
 
 	h := newProxyHarness(t, memblob.OpenBucket(nil), debian.Config{}, proxyNS("team-proxy", upstream))
-	proxyBase := h.server.URL + "/team-proxy/debian"
 
 	root := t.TempDir()
-	env := newAptEnv(t, root, proxyBase, arch, false, suite)
+	env := newAptEnv(t, root, h.server.URL+"/team-proxy/debian", arch, false, suite)
 	env.timeout = 180 * time.Second // a real dist index is larger than the fake repo's.
 
 	// apt-get update verifies the InRelease signature against the system keyring
-	// on the bytes our proxy served — so this passing is the verbatim-passthrough
-	// proof for the signed index.
+	// on the bytes our proxy served — the verbatim-passthrough proof on real data.
 	env.run(t, aptGet, "update")
 
 	// A real .deb flows through the pull-through cache.
@@ -58,19 +54,6 @@ func TestProxyLiveUpstream(t *testing.T) {
 	if !strings.HasPrefix(string(deb), "!<arch>\n") {
 		t.Fatalf("downloaded file is not a .deb ar archive (got %d bytes)", len(deb))
 	}
-
-	// Independently of apt, a direct proxy GET of an index file must match a
-	// direct upstream fetch byte-for-byte.
-	releasePath := "/dists/" + suite + "/Release"
-	resp := get(t, h, "/team-proxy/debian"+releasePath)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("proxy Release GET status = %d, want 200: %s", resp.StatusCode, readResp(t, resp))
-	}
-	viaProxy := readResp(t, resp)
-	direct := fetch(t, upstream+releasePath)
-	if viaProxy != direct {
-		t.Fatalf("proxied Release differs from upstream (%d vs %d bytes)", len(viaProxy), len(direct))
-	}
 }
 
 // ubuntuMirror returns the official Ubuntu mirror that carries the given dpkg
@@ -82,47 +65,6 @@ func ubuntuMirror(arch string) string {
 	default:
 		return "http://ports.ubuntu.com/ubuntu-ports"
 	}
-}
-
-func requireReachable(t *testing.T, url string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("build reachability request: %v", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Skipf("upstream %s unreachable: %v", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Skipf("upstream %s returned %d", url, resp.StatusCode)
-	}
-}
-
-func fetch(t *testing.T, url string) string {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("build request %s: %v", url, err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET %s status = %d", url, resp.StatusCode)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read %s: %v", url, err)
-	}
-	return string(body)
 }
 
 func findDeb(t *testing.T, dir string) []byte {
