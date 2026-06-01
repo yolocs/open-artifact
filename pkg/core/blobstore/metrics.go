@@ -65,6 +65,10 @@ func blobStatus(err error) string {
 		return "not_found"
 	case gcerrors.AlreadyExists:
 		return "already_exists"
+	case gcerrors.FailedPrecondition:
+		// A refused IfNotExist conditional create: an expected no-overwrite
+		// conflict, not a backend fault — keep it out of the "error" bucket.
+		return "already_exists"
 	case gcerrors.Unimplemented:
 		return "unsupported"
 	default:

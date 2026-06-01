@@ -712,6 +712,27 @@ the cache.
   `Close` would commit the bytes written so far as a complete object), so a body
   that ends early — a disconnected upload, an interrupted proxy stream — never
   leaves a partial, servable blob.
+- No-overwrite creates are **atomic**, not probe-then-write. Every
+  `AllowOverwrite=false` create — `AddFile`, `AddVersion`, `AddPackage`, and
+  the file write path — sets `blob.WriterOptions{IfNotExist: true}`, so the
+  backend refuses the commit when the key already exists and returns
+  `gcerrors.FailedPrecondition`, which `blobstore` maps to `ErrAlreadyExists`.
+  This is what makes a concurrent first-publish race safe: only one writer's
+  blob can commit, so the loser never writes its `.meta` sidecar and a blob can
+  never be left paired with a digest from a different writer (a *torn* write). A
+  cheap `Exists` probe still front-runs the **file** write as an early reject
+  for large bodies, but it is only an optimization — the precondition is the
+  correctness guarantee. The guarantee is **atomic on memblob and on the
+  production cloud backends** (gcs/s3/azure, which use native server-side
+  preconditions); **fileblob's `IfNotExist` is best-effort** (an `os.Stat` then
+  `os.Rename` guarded only by a per-writer lock), so concurrent same-key writers
+  can still race on a local file bucket — a known gocloud driver limitation, and
+  no worse than the prior probe-then-write. fileblob is a local/dev backend;
+  multi-replica deployments run on the cloud backends where the guarantee holds.
+  Folding the per-file digest into the blob's own
+  object metadata (dropping the sidecar entirely) is deferred until the backend
+  can set metadata after a streamed write — gocloud fixes `WriterOptions.Metadata`
+  at writer-open time, before the digest is known.
 - `File.DownloadURL` wraps `bucket.SignedURL` behind a mandatory,
   facade-transparent LRU + singleflight cache with per-cloud TTL parsing.
   memblob/fileblob return no signed URL → cache the miss and return an empty
@@ -923,9 +944,12 @@ GET  /packages/{package}/versions/{version}/files/{f}   download a file (redirec
   listing, not a side index.)
 - **Generic proxy mode** — the generic format is hosted-only in v1; a proxy-mode
   generic namespace returns `501`.
-- **Multi-replica `SetTag`** — v1 guards the per-tag read-modify-write with an
-  in-process mutex; multi-replica needs CAS / conditional writes at the bucket
-  layer.
+- **Multi-replica `SetTag`** — not a limitation: each dist-tag is its own
+  object (`…/.tags/<tag>`, body = target version), so `SetTag` is a single-object
+  write with last-write-wins semantics (the only sensible behavior for an alias).
+  There is no read-modify-write and no in-process mutex, so it is already correct
+  under multiple replicas. (Atomicity matters for no-overwrite *creates*, not
+  tags; those use `WriterOptions.IfNotExist` — see the gocloud notes.)
 - **Static username/password auth** — OIDC only in v1.
 - **Serving multiple formats from one process** — v1 serves exactly one format
   per `serve` process; run separate processes for separate endpoints.

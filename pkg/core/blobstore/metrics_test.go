@@ -2,12 +2,15 @@ package blobstore
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
 	"gocloud.dev/blob"
+
+	"github.com/yolocs/open-artifact/pkg/core"
 )
 
 // fakeMetrics captures blob-backend calls and redirect outcomes for assertions.
@@ -119,6 +122,34 @@ func TestMetricsEmittedAcrossFileLifecycle(t *testing.T) {
 		}
 		if fm.redirect("redirected") != 0 {
 			t.Errorf("unsigned backend should not report redirected: %v", fm.redirects)
+		}
+	})
+}
+
+// TestMetricsConflictClassifiedAsAlreadyExists proves a refused IfNotExist
+// create is recorded as a no-overwrite conflict, not a backend error, so it
+// stays out of the "error" bucket that drives alerting.
+func TestMetricsConflictClassifiedAsAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	eachBackend(t, func(t *testing.T, b *blob.Bucket) {
+		ctx := t.Context()
+		fm := newFakeMetrics()
+		s, err := NewWithBucket(b, testScope, WithMetrics(fm))
+		if err != nil {
+			t.Fatalf("NewWithBucket: %v", err)
+		}
+
+		if _, err := s.AddPackage(ctx, "requests"); err != nil {
+			t.Fatalf("first AddPackage: %v", err)
+		}
+		// The second no-overwrite create is refused by the precondition; the
+		// refused write must be classified as already_exists, not error.
+		if _, err := s.AddPackage(ctx, "requests"); !errors.Is(err, core.ErrAlreadyExists) {
+			t.Fatalf("second AddPackage err = %v, want ErrAlreadyExists", err)
+		}
+		if got := fm.status(opWriteAll); got != "already_exists" {
+			t.Errorf("write_all status after conflict = %q, want already_exists", got)
 		}
 	})
 }
