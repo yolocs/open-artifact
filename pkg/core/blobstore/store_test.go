@@ -434,6 +434,82 @@ func TestConcurrentAddFileDifferentFiles(t *testing.T) {
 	})
 }
 
+// TestConcurrentAddFileSameFile is the torn-write guard. N writers race to
+// create the same key with *different* bytes. Without an atomic create, two
+// could both pass the existence probe and both commit, leaving the blob from
+// one writer paired with the .meta digest from another (a digest that no longer
+// matches the stored bytes). With IfNotExist exactly one writer wins; the rest
+// get ErrAlreadyExists, and the winner's recorded digest must match the bytes
+// actually stored.
+//
+// This runs on memblob only: its IfNotExist is truly atomic (the existence
+// check and insert are under one bucket-wide lock), as are the production cloud
+// backends (gcs/s3/azure use native server-side preconditions). fileblob's
+// IfNotExist is best-effort — an os.Stat then os.Rename guarded by a per-writer
+// lock — so concurrent same-key writers can still race there. fileblob is a
+// local/dev backend and this is a documented gocloud driver limitation (and no
+// worse than the prior probe-then-write), so we don't assert the invariant
+// against it.
+func TestConcurrentAddFileSameFile(t *testing.T) {
+	t.Parallel()
+
+	b := memblob.OpenBucket(nil)
+	t.Cleanup(func() { b.Close() })
+	ctx := t.Context()
+	s, _ := NewWithBucket(b, testScope)
+	v := s.Package("p").Version("1.0.0")
+
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Distinct bytes per writer so a torn pairing is detectable.
+			body := bytes.Repeat([]byte{byte('a' + i)}, 64+i)
+			_, errs[i] = v.AddFile(ctx, "race.bin", bytes.NewReader(body))
+		}()
+	}
+	wg.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, core.ErrAlreadyExists):
+			// expected loser
+		default:
+			t.Errorf("writer %d: unexpected error %v", i, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("got %d winners, want exactly 1", winners)
+	}
+
+	// The committed bytes and the recorded digest must agree: read the blob
+	// back, hash it, and compare to the digest the Store reports.
+	rc, err := v.File("race.bin").Read(ctx)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+
+	meta, err := v.File("race.bin").Meta(ctx)
+	if err != nil {
+		t.Fatalf("Meta: %v", err)
+	}
+	if want := sha256Hex(got); meta.Digest != want {
+		t.Errorf("digest %q does not match stored bytes %q (torn write)", meta.Digest, want)
+	}
+	if meta.Size != int64(len(got)) {
+		t.Errorf("size %d does not match stored bytes %d", meta.Size, len(got))
+	}
+}
+
 func TestAddReadRaceSameFile(t *testing.T) {
 	t.Parallel()
 

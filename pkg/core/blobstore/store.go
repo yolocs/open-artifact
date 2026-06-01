@@ -152,18 +152,9 @@ func (s *Store) AddPackage(ctx context.Context, name string, opts ...core.Create
 	}
 	cfg := core.NewCreateConfig(opts...)
 	path := packageMetaPath(s.scope, name)
-	if !cfg.AllowOverwrite {
-		exists, err := s.bExists(ctx, path)
-		if err != nil {
-			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
-		}
-		if exists {
-			return nil, core.ErrAlreadyExists
-		}
-	}
 	now := s.now().UTC()
 	meta := core.Meta{CreatedAt: now, UpdatedAt: now, Annotations: cfg.Annotations}
-	if err := s.writeMeta(ctx, path, meta); err != nil {
+	if err := s.writeMeta(ctx, path, meta, cfg.AllowOverwrite); err != nil {
 		return nil, err
 	}
 	return &pkg{store: s, name: name}, nil
@@ -306,7 +297,7 @@ func (s *Store) upsertAnnotations(ctx context.Context, path string, annotations 
 	}
 	m.UpdatedAt = now
 	m.Annotations = annotations
-	return s.writeMeta(ctx, path, m)
+	return s.writeMeta(ctx, path, m, true)
 }
 
 // pkg is the blobstore implementation of core.Package. nameErr is set when the
@@ -392,18 +383,9 @@ func (p *pkg) AddVersion(ctx context.Context, name string, opts ...core.CreateOp
 	}
 	cfg := core.NewCreateConfig(opts...)
 	path := versionMetaPath(s.scope, p.name, name)
-	if !cfg.AllowOverwrite {
-		exists, err := s.bExists(ctx, path)
-		if err != nil {
-			return nil, fmt.Errorf("blobstore: probe %q: %w", path, mapErr(err))
-		}
-		if exists {
-			return nil, core.ErrAlreadyExists
-		}
-	}
 	now := s.now().UTC()
 	meta := core.Meta{CreatedAt: now, UpdatedAt: now, Annotations: cfg.Annotations}
-	if err := s.writeMeta(ctx, path, meta); err != nil {
+	if err := s.writeMeta(ctx, path, meta, cfg.AllowOverwrite); err != nil {
 		return nil, err
 	}
 	return &version{pkg: p, name: name}, nil
@@ -670,6 +652,7 @@ func digestKey(h crypto.Hash) string {
 // shared write path behind AddFile and Cache.Put; it does not authorize —
 // callers do, mapping the operation to read or write as appropriate.
 func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.Reader, cfg core.CreateConfig) (core.Meta, error) {
+	var wopts *blob.WriterOptions
 	if !cfg.AllowOverwrite {
 		exists, err := s.bExists(ctx, blobKey)
 		if err != nil {
@@ -678,6 +661,13 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 		if exists {
 			return core.Meta{}, core.ErrAlreadyExists
 		}
+		// The probe above is a cheap early reject; IfNotExist is the atomic
+		// guard behind it. Two concurrent first-writers can both pass the probe,
+		// so the backend precondition is what actually picks the single winner:
+		// the loser's commit is refused and its bytes are never committed. That
+		// is what prevents a torn write — the blob and its .meta sidecar can no
+		// longer originate from two different racing writers.
+		wopts = &blob.WriterOptions{IfNotExist: true}
 	}
 
 	// The blob writer is created under a child context we can cancel. On a
@@ -688,7 +678,7 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 	// fill, a disconnected upload) where the body can end early.
 	wctx, cancelWrite := context.WithCancel(ctx)
 	defer cancelWrite()
-	w, err := s.bNewWriter(wctx, blobKey, nil)
+	w, err := s.bNewWriter(wctx, blobKey, wopts)
 	if err != nil {
 		return core.Meta{}, fmt.Errorf("blobstore: open writer %q: %w", blobKey, mapErr(err))
 	}
@@ -731,7 +721,9 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 		digests[v.key] = hex.EncodeToString(got)
 	}
 	if err := s.closeWriter(w); err != nil {
-		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapErr(err))
+		// A refused IfNotExist precondition means a concurrent writer committed
+		// first; surface it as ErrAlreadyExists, like the probe above.
+		return core.Meta{}, fmt.Errorf("blobstore: commit %q: %w", blobKey, mapCreateErr(err))
 	}
 
 	now := s.now().UTC()
@@ -743,7 +735,7 @@ func (s *Store) writeFile(ctx context.Context, blobKey, metaKey string, body io.
 		UpdatedAt:   now,
 		Annotations: cfg.Annotations,
 	}
-	if err := s.writeMeta(ctx, metaKey, meta); err != nil {
+	if err := s.writeMeta(ctx, metaKey, meta, true); err != nil {
 		// The blob is committed and reachable; the digest is recomputed lazily
 		// on read if the sidecar is absent. Surface the error so the caller
 		// knows the sidecar did not land.
@@ -1021,14 +1013,23 @@ func (t *tag) Exists(ctx context.Context) (bool, error) {
 	return ok, nil
 }
 
-// writeMeta encodes and writes a Meta envelope to path.
-func (s *Store) writeMeta(ctx context.Context, path string, m core.Meta) error {
+// writeMeta encodes and writes a Meta envelope to path. When overwrite is
+// false the write is conditional (IfNotExist): a pre-existing object yields
+// core.ErrAlreadyExists, so a create is atomic and needs no separate probe —
+// two concurrent creators of the same record resolve to exactly one winner.
+func (s *Store) writeMeta(ctx context.Context, path string, m core.Meta, overwrite bool) error {
 	b, err := encodeMeta(m)
 	if err != nil {
 		return fmt.Errorf("encode meta: %w", err)
 	}
-	if err := s.bWriteAll(ctx, path, b, nil); err != nil {
-		return fmt.Errorf("write %q: %w", path, mapErr(err))
+	var wopts *blob.WriterOptions
+	mapper := mapErr
+	if !overwrite {
+		wopts = &blob.WriterOptions{IfNotExist: true}
+		mapper = mapCreateErr
+	}
+	if err := s.bWriteAll(ctx, path, b, wopts); err != nil {
+		return fmt.Errorf("write %q: %w", path, mapper(err))
 	}
 	return nil
 }
@@ -1048,4 +1049,14 @@ func mapErr(err error) error {
 		return core.ErrNotFound
 	}
 	return err
+}
+
+// mapCreateErr is mapErr for conditional (IfNotExist) create paths: a refused
+// precondition (FailedPrecondition) means the object already exists, so it maps
+// to core.ErrAlreadyExists. All other errors fall through to mapErr.
+func mapCreateErr(err error) error {
+	if gcerrors.Code(err) == gcerrors.FailedPrecondition {
+		return core.ErrAlreadyExists
+	}
+	return mapErr(err)
 }
