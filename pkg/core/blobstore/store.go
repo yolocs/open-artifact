@@ -1054,6 +1054,12 @@ func mapErr(err error) error {
 // mapCreateErr is mapErr for conditional (IfNotExist) create paths: a refused
 // precondition (FailedPrecondition) means the object already exists, so it maps
 // to core.ErrAlreadyExists. All other errors fall through to mapErr.
+//
+// This is only sound because IfNotExist is the *only* precondition the Store
+// ever attaches to a writer. If a future change sets ContentMD5, IfMatch, or
+// another WriterOption that can also fail with FailedPrecondition, this mapping
+// must be narrowed (e.g. inspect the cause) so a non-existence failure is not
+// mislabeled as ErrAlreadyExists.
 func mapCreateErr(err error) error {
 	if gcerrors.Code(err) == gcerrors.FailedPrecondition {
 		return core.ErrAlreadyExists
